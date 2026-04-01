@@ -67,7 +67,7 @@ def convert_textual_memory_item(item: dict, episode_num: int) -> dict:
 
 def convert_cube_dump(cube_dir: str, output_path: str) -> str:
     tm_path = Path(cube_dir) / "textual_memory.json"
-    with open(tm_path) as f:
+    with open(tm_path, encoding="utf-8") as f:
         items = json.load(f)
 
     episodes = []
@@ -76,7 +76,7 @@ def convert_cube_dump(cube_dir: str, output_path: str) -> str:
         episodes.append(ep)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(episodes, f, indent=2)
 
     print(f"Converted {len(episodes)} episodes to {output_path}")
