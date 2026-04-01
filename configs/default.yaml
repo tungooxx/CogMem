@@ -1,0 +1,10 @@
+memory_bank_path: results/memory_bank.json
+adapters_dir: adapters/
+logs_dir: logs/
+q_threshold: 0.7
+lora_rank: 16
+lora_alpha: 32
+lora_epochs: 3
+base_model: meta-llama/Llama-3.2-3B-Instruct
+verification_holdout: 20
+seed: 42
