@@ -1,0 +1,215 @@
+import json
+import pytest
+from pathlib import Path
+
+
+@pytest.fixture
+def sample_episodes():
+    """15 episodes across 6 task types, mix of success/failure, varying Q-values."""
+    return [
+        {
+            "episode_id": "ep_001",
+            "task_description": "put a clean mug in shelf 1",
+            "task_type": "clean",
+            "script": "1. Find mug on countertop 1\n2. Take mug\n3. Go to sinkbasin 1\n4. Clean mug\n5. Go to shelf 1\n6. Put mug in shelf 1",
+            "intent_embedding": [0.1] * 384,
+            "success": True,
+            "q_value": 0.92,
+            "q_visits": 8,
+            "num_steps": 6,
+            "timestamp": "2026-04-01T10:00:00",
+        },
+        {
+            "episode_id": "ep_002",
+            "task_description": "put a hot apple in fridge 1",
+            "task_type": "heat",
+            "script": "1. Find apple on dining table\n2. Take apple\n3. Go to microwave 1\n4. Heat apple\n5. Go to fridge 1\n6. Put apple in fridge 1",
+            "intent_embedding": [0.2] * 384,
+            "success": True,
+            "q_value": 0.85,
+            "q_visits": 6,
+            "num_steps": 6,
+            "timestamp": "2026-04-01T10:05:00",
+        },
+        {
+            "episode_id": "ep_003",
+            "task_description": "examine a book under desklamp",
+            "task_type": "examine",
+            "script": "1. Find book on shelf 2\n2. Take book\n3. Go to desklamp 1\n4. Use desklamp",
+            "intent_embedding": [0.3] * 384,
+            "success": True,
+            "q_value": 0.78,
+            "q_visits": 5,
+            "num_steps": 4,
+            "timestamp": "2026-04-01T10:10:00",
+        },
+        {
+            "episode_id": "ep_004",
+            "task_description": "put a pencil in drawer 1",
+            "task_type": "pick",
+            "script": "1. Find pencil on desk 1\n2. Take pencil\n3. Go to drawer 1\n4. Put pencil in drawer 1",
+            "intent_embedding": [0.4] * 384,
+            "success": True,
+            "q_value": 0.71,
+            "q_visits": 4,
+            "num_steps": 4,
+            "timestamp": "2026-04-01T10:15:00",
+        },
+        {
+            "episode_id": "ep_005",
+            "task_description": "put a cool egg in fridge 1",
+            "task_type": "cool",
+            "script": "1. Find egg on countertop 2\n2. Take egg\n3. Go to fridge 1\n4. Cool egg\n5. Put egg in fridge 1",
+            "intent_embedding": [0.5] * 384,
+            "success": True,
+            "q_value": 0.65,
+            "q_visits": 3,
+            "num_steps": 5,
+            "timestamp": "2026-04-01T10:20:00",
+        },
+        {
+            "episode_id": "ep_006",
+            "task_description": "put two pencils in drawer 1",
+            "task_type": "puttwo",
+            "script": "1. Find pencil on desk 1\n2. Take pencil\n3. Go to drawer 1\n4. Put pencil\n5. Find pencil on shelf 1\n6. Take pencil\n7. Go to drawer 1\n8. Put pencil",
+            "intent_embedding": [0.6] * 384,
+            "success": True,
+            "q_value": 0.55,
+            "q_visits": 3,
+            "num_steps": 8,
+            "timestamp": "2026-04-01T10:25:00",
+        },
+        {
+            "episode_id": "ep_007",
+            "task_description": "put a clean plate in cabinet 1",
+            "task_type": "clean",
+            "script": "1. Find plate on dining table\n2. Take plate\n3. Go to sinkbasin 1\n4. Clean plate\n5. Go to cabinet 1\n6. Put plate in cabinet 1",
+            "intent_embedding": [0.15] * 384,
+            "success": True,
+            "q_value": 0.45,
+            "q_visits": 2,
+            "num_steps": 6,
+            "timestamp": "2026-04-01T10:30:00",
+        },
+        {
+            "episode_id": "ep_008",
+            "task_description": "put a knife in drawer 2",
+            "task_type": "pick",
+            "script": "",
+            "intent_embedding": [0.25] * 384,
+            "success": False,
+            "q_value": 0.30,
+            "q_visits": 2,
+            "num_steps": 50,
+            "timestamp": "2026-04-01T10:35:00",
+        },
+        {
+            "episode_id": "ep_009",
+            "task_description": "examine a pen under desklamp",
+            "task_type": "examine",
+            "script": "",
+            "intent_embedding": [0.35] * 384,
+            "success": False,
+            "q_value": 0.22,
+            "q_visits": 1,
+            "num_steps": 50,
+            "timestamp": "2026-04-01T10:40:00",
+        },
+        {
+            "episode_id": "ep_010",
+            "task_description": "put a hot mug in shelf 2",
+            "task_type": "heat",
+            "script": "",
+            "intent_embedding": [0.45] * 384,
+            "success": False,
+            "q_value": 0.15,
+            "q_visits": 1,
+            "num_steps": 50,
+            "timestamp": "2026-04-01T10:45:00",
+        },
+        {
+            "episode_id": "ep_011",
+            "task_description": "put a cool potato in cabinet 1",
+            "task_type": "cool",
+            "script": "",
+            "intent_embedding": [0.55] * 384,
+            "success": False,
+            "q_value": 0.10,
+            "q_visits": 1,
+            "num_steps": 50,
+            "timestamp": "2026-04-01T10:50:00",
+        },
+        {
+            "episode_id": "ep_012",
+            "task_description": "put two books in shelf 1",
+            "task_type": "puttwo",
+            "script": "",
+            "intent_embedding": [0.65] * 384,
+            "success": False,
+            "q_value": 0.05,
+            "q_visits": 1,
+            "num_steps": 50,
+            "timestamp": "2026-04-01T10:55:00",
+        },
+        {
+            "episode_id": "ep_013",
+            "task_description": "put a clean fork in drawer 1",
+            "task_type": "clean",
+            "script": "1. Find fork on countertop 1\n2. Take fork\n3. Go to sinkbasin 1\n4. Clean fork\n5. Go to drawer 1\n6. Put fork in drawer 1",
+            "intent_embedding": [0.12] * 384,
+            "success": True,
+            "q_value": 0.88,
+            "q_visits": 7,
+            "num_steps": 6,
+            "timestamp": "2026-04-01T11:00:00",
+        },
+        {
+            "episode_id": "ep_014",
+            "task_description": "put a pencil in shelf 1",
+            "task_type": "pick",
+            "script": "1. Find pencil on desk 2\n2. Take pencil\n3. Go to shelf 1\n4. Put pencil in shelf 1",
+            "intent_embedding": [0.42] * 384,
+            "success": True,
+            "q_value": 0.75,
+            "q_visits": 5,
+            "num_steps": 4,
+            "timestamp": "2026-04-01T11:05:00",
+        },
+        {
+            "episode_id": "ep_015",
+            "task_description": "examine a cd under desklamp",
+            "task_type": "examine",
+            "script": "1. Find cd on shelf 3\n2. Take cd\n3. Go to desklamp 1\n4. Use desklamp",
+            "intent_embedding": [0.32] * 384,
+            "success": True,
+            "q_value": 0.40,
+            "q_visits": 2,
+            "num_steps": 4,
+            "timestamp": "2026-04-01T11:10:00",
+        },
+    ]
+
+
+@pytest.fixture
+def sample_memory_bank_path(tmp_path, sample_episodes):
+    """Write sample episodes to a temp JSON file."""
+    path = tmp_path / "memory_bank.json"
+    path.write_text(json.dumps(sample_episodes, indent=2))
+    return str(path)
+
+
+@pytest.fixture
+def sample_replay_buffer():
+    """MemRL-style few-shot examples for replay buffer."""
+    return [
+        {
+            "task": "clean",
+            "instruction": "put a clean mug in shelf 1",
+            "response": "1. Find mug\n2. Take mug\n3. Go to sinkbasin\n4. Clean mug\n5. Go to shelf 1\n6. Put mug",
+        },
+        {
+            "task": "pick",
+            "instruction": "put a pencil in drawer 1",
+            "response": "1. Find pencil\n2. Take pencil\n3. Go to drawer 1\n4. Put pencil",
+        },
+    ]
