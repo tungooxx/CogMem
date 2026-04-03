@@ -1,30 +1,46 @@
 """Phase 0: Pre-flight checks before spending compute or money.
 
 Run this first. It verifies:
-1. Together AI supports the target model for fine-tuning
-2. Ollama is running and serves llama3.2:3b
-3. ALFWorld is installed and data is downloaded
+1. Ollama is running and serves llama3.2:3b
+2. Together AI supports the target model for fine-tuning
+3. ALFWorld is installed (may be in WSL on Windows)
 4. Required Python packages are importable
 
+Split-environment support (Windows):
+- Windows: Ollama, Together AI, ML packages (torch, transformers, etc.)
+- WSL:     ALFWorld + episode collection (alfworld needs Linux)
+
 Usage:
-    python scripts/run_phase0.py
+    python scripts/run_phase0.py          # Windows checks + WSL alfworld probe
+    python3 scripts/run_phase0.py --wsl   # Run inside WSL (alfworld only)
 """
 
+import platform
+import shutil
+import subprocess
 import sys
 
 
 def check_ollama():
     print("[1/4] Checking Ollama...")
     try:
-        from openai import OpenAI
+        import json
+        import urllib.request
 
-        client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-        resp = client.chat.completions.create(
-            model="llama3.2:3b",
-            messages=[{"role": "user", "content": "Say OK"}],
-            max_tokens=10,
+        payload = json.dumps({
+            "model": "llama3.2:3b",
+            "prompt": "Say OK",
+            "options": {"num_ctx": 2048},
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
         )
-        text = resp.choices[0].message.content
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        text = data.get("response", "")
         print(f"  OK — Ollama responded: {text.strip()[:50]}")
         return True
     except Exception as e:
@@ -60,15 +76,36 @@ def check_together_api():
 
 def check_alfworld():
     print("[3/4] Checking ALFWorld...")
+    # Direct import (works on Linux/WSL)
     try:
         import alfworld
 
-        print(f"  OK — alfworld {alfworld.__version__} installed")
+        version = getattr(alfworld, "__version__", "unknown")
+        print(f"  OK — alfworld {version} installed")
         return True
     except ImportError:
-        print("  FAIL — alfworld not installed")
-        print("  Fix: pip install alfworld && alfworld-download")
-        return False
+        pass
+
+    # On Windows, probe WSL for alfworld
+    if platform.system() == "Windows" and shutil.which("wsl"):
+        print("  INFO — alfworld not available on Windows, checking WSL...")
+        try:
+            result = subprocess.run(
+                [
+                    "wsl", "-d", "Ubuntu", "-u", "chucky", "-e",
+                    "python3", "-c", "import alfworld; print('OK')",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            if "OK" in result.stdout:
+                print("  OK — alfworld available in WSL (episode collection will run there)")
+                return True
+        except Exception:
+            pass
+
+    print("  FAIL — alfworld not installed")
+    print("  Fix: In WSL run: pip3 install alfworld --break-system-packages && alfworld-download")
+    return False
 
 
 def check_packages():
@@ -97,16 +134,25 @@ def check_packages():
 
 
 def main():
+    wsl_mode = "--wsl" in sys.argv
+
     print("=" * 50)
-    print("CogMem Phase 0: Pre-Flight Checks")
+    if wsl_mode:
+        print("CogMem Phase 0: Pre-Flight Checks (WSL mode)")
+    else:
+        print("CogMem Phase 0: Pre-Flight Checks")
     print("=" * 50 + "\n")
 
-    results = [
-        check_ollama(),
-        check_together_api(),
-        check_alfworld(),
-        check_packages(),
-    ]
+    if wsl_mode:
+        # WSL mode: only check alfworld
+        results = [check_alfworld()]
+    else:
+        results = [
+            check_ollama(),
+            check_together_api(),
+            check_alfworld(),
+            check_packages(),
+        ]
 
     print("\n" + "=" * 50)
     passed = sum(results)

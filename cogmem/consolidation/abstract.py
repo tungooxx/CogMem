@@ -2,15 +2,16 @@ import json
 from pathlib import Path
 
 
-def episode_to_training_pair(episode: dict) -> dict | None:
-    if not episode.get("success"):
-        return None
+def episode_to_training_pair(episode: dict, include_failures: bool = True) -> dict | None:
     if not episode.get("script"):
+        return None
+    if not include_failures and not episode.get("success"):
         return None
     return {
         "instruction": episode["task_description"],
         "response": episode["script"],
-        "weight": episode["q_value"],
+        "weight": max(episode.get("q_value", 0.0), 0.01),
+        "success": episode.get("success", False),
         "source_episode": episode["episode_id"],
     }
 
@@ -26,10 +27,11 @@ def q_weighted_duplicates(pairs: list[dict]) -> list[dict]:
 def prepare_training_dataset(
     episodes: list[dict],
     replay_buffer: list[dict] | None = None,
+    include_failures: bool = True,
 ) -> list[dict]:
     pairs = []
     for ep in episodes:
-        pair = episode_to_training_pair(ep)
+        pair = episode_to_training_pair(ep, include_failures=include_failures)
         if pair is not None:
             pairs.append(pair)
 

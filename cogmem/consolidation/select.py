@@ -2,9 +2,14 @@ import random as _random
 
 
 def select_q_top_k(episodes: list[dict], config) -> list[dict]:
-    selected = [ep for ep in episodes if ep["q_value"] >= config.q_threshold]
-    selected.sort(key=lambda x: x["q_value"], reverse=True)
-    return selected
+    sorted_eps = sorted(episodes, key=lambda x: x["q_value"], reverse=True)
+    if config.q_threshold is not None:
+        selected = [ep for ep in sorted_eps if ep["q_value"] >= config.q_threshold]
+        if selected:
+            return selected
+    # Fallback: take top 25% by Q-value
+    n = max(1, len(sorted_eps) // 4)
+    return sorted_eps[:n]
 
 
 def _match_count(episodes: list[dict], config) -> int:

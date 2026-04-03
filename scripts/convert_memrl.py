@@ -47,9 +47,10 @@ def _extract_script(full_content: str) -> str:
 
 
 def convert_textual_memory_item(item: dict, episode_num: int) -> dict:
-    meta = item.get("metadata", {})
+    payload = item.get("payload", item)
+    meta = payload.get("metadata", item.get("metadata", {}))
     full_content = meta.get("full_content", "")
-    task_desc = item.get("memory", "")
+    task_desc = payload.get("memory", item.get("memory", ""))
 
     return {
         "episode_id": f"ep_{episode_num:03d}",

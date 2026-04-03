@@ -10,3 +10,12 @@ build/
 *.so
 *.pyd
 .env
+
+# Large data — don't commit
+phase1_backup/
+cogmem_phase1_results/
+.memos/
+adapters/
+results/memory_bank.json
+logs/
+*.tar.gz

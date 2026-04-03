@@ -6,6 +6,7 @@ from cogmem.config import CogMemConfig
 from cogmem.consolidation.abstract import prepare_training_dataset, save_as_jsonl
 from cogmem.consolidation.select import POLICIES
 from cogmem.consolidation.train_lora import train_lora_together
+from cogmem.consolidation.train_lora_local import train_lora_local
 from cogmem.consolidation.verify import (
     aggregate_seed_results,
     run_verification_single_seed,
@@ -41,7 +42,10 @@ def run_consolidation(
     jsonl_path = save_as_jsonl(training_pairs, f"{jsonl_dir}/{policy_name}.jsonl")
 
     # Train LoRA
-    train_result = train_lora_together(jsonl_path, config, policy_name=policy_name)
+    if config.lora_provider == "local":
+        train_result = train_lora_local(jsonl_path, config, policy_name=policy_name)
+    else:
+        train_result = train_lora_together(jsonl_path, config, policy_name=policy_name)
 
     # Verify with multiple seeds
     seed_results = []
