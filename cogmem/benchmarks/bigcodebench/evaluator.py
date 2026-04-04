@@ -51,6 +51,8 @@ def _build_test_script(task: dict, generated_code: str) -> str:
     complete_prompt = task.get("complete_prompt", "")
     test_code = task.get("test", "")
     entry_point = task.get("entry_point", "")
+    if not entry_point:
+        raise ValueError("Task missing 'entry_point' — cannot build test script")
 
     # Build the full script:
     # 1. The complete prompt (has imports + function signature)
@@ -122,8 +124,8 @@ def _evaluate_docker(task: dict, generated_code: str, timeout: int) -> dict:
             [
                 "docker", "run", "--rm",
                 "--network=none",
-                f"--memory=512m",
-                f"--cpus=1",
+                "--memory=512m",
+                "--cpus=1",
                 "-v", f"{script_path}:/tmp/test.py:ro",
                 "python:3.10-slim",
                 "python3", "/tmp/test.py",
@@ -148,10 +150,13 @@ def _evaluate_docker(task: dict, generated_code: str, timeout: int) -> dict:
 
 
 def _safe_env():
-    """Build a safe environment for subprocess execution."""
+    """Build environment with sensitive API keys removed.
+
+    Note: This only prevents credential leakage. For full network isolation,
+    use Docker mode.
+    """
     import os
     env = os.environ.copy()
-    # Prevent the script from accessing network or sensitive env vars
     for key in ["TOGETHER_API_KEY", "GROQ_API_KEY", "HF_TOKEN", "OPENAI_API_KEY"]:
         env.pop(key, None)
     return env

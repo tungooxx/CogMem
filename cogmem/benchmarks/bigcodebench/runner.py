@@ -9,11 +9,7 @@ import time
 from pathlib import Path
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
-from cogmem.benchmarks.bigcodebench.prompts import (
-    SYSTEM_PROMPT,
-    extract_code,
-    format_messages,
-)
+from cogmem.benchmarks.bigcodebench.prompts import extract_code, format_messages
 
 
 def run_single_task(
