@@ -15,6 +15,9 @@ import textwrap
 from pathlib import Path
 
 
+_VALID_MODES = {"subprocess", "docker"}
+
+
 def evaluate_solution(
     task: dict,
     generated_code: str,
@@ -27,11 +30,13 @@ def evaluate_solution(
         task: BigCodeBench task dict with 'test', 'complete_prompt', 'entry_point'.
         generated_code: The model's generated code.
         timeout: Max seconds for test execution.
-        mode: "subprocess" or "docker".
+        mode: "subprocess" (default, fine for isolated VMs) or "docker".
 
     Returns:
         {"passed": bool, "error": str | None, "output": str}
     """
+    if mode not in _VALID_MODES:
+        raise ValueError(f"Unknown eval mode {mode!r}, must be one of {_VALID_MODES}")
     if mode == "docker":
         return _evaluate_docker(task, generated_code, timeout)
     return _evaluate_subprocess(task, generated_code, timeout)

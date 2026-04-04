@@ -135,6 +135,17 @@ class TestEvaluator:
         result = evaluate_solution(task, "    return !!!invalid", timeout=10)
         assert result["passed"] is False
 
+    def test_evaluate_solution_invalid_mode(self):
+        from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
+
+        task = {
+            "complete_prompt": "def foo():",
+            "test": "def check(fn):\n    fn()",
+            "entry_point": "foo",
+        }
+        with pytest.raises(ValueError, match="Unknown eval mode"):
+            evaluate_solution(task, "    pass", mode="typo")
+
     def test_evaluate_batch(self):
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_batch
 
@@ -224,6 +235,19 @@ class TestRunner:
         assert eps[0]["task_id"] == "t1"
         Path(path).unlink()
 
+    def test_load_episodes_truncated(self):
+        from cogmem.benchmarks.bigcodebench.runner import load_episodes
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write(json.dumps({"task_id": "t1", "success": True}) + "\n")
+            f.write('{"task_id": "t2", "succ')  # Truncated line (crash mid-write)
+            path = f.name
+
+        eps = load_episodes(path)
+        assert len(eps) == 1  # Only the valid line
+        assert eps[0]["task_id"] == "t1"
+        Path(path).unlink()
+
 
 # --- training data builder tests ---
 
@@ -269,11 +293,11 @@ class TestBuildTrainingData:
         build_training_data(mb_path, out_path)
 
         with open(out_path) as f:
-            lines = [json.loads(l) for l in f if l.strip()]
+            lines = [json.loads(line) for line in f if line.strip()]
 
         assert len(lines) > 0
         # Should have both system and raw formats
-        assert any("system" in str(l) for l in lines)
+        assert any("system" in str(line) for line in lines)
 
         Path(mb_path).unlink()
         Path(out_path).unlink()

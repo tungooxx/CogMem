@@ -110,18 +110,15 @@ def run_batch(
     completed_ids = set()
     episodes = []
     if checkpoint_path and Path(checkpoint_path).exists():
-        with open(checkpoint_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    ep = json.loads(line)
-                    completed_ids.add(ep["task_id"])
-                    episodes.append(ep)
+        episodes = load_episodes(checkpoint_path)
+        completed_ids = {ep["task_id"] for ep in episodes}
         print(f"Resumed: {len(completed_ids)} tasks already completed")
 
-    # Ensure output directory exists
+    # Ensure output/checkpoint directories exist
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    if checkpoint_path and checkpoint_path != output_path:
+        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
 
     remaining = [t for t in tasks if t["task_id"] not in completed_ids]
     total = len(tasks)
@@ -171,11 +168,19 @@ def episodes_to_memory_bank(episodes: list[dict], output_path: str) -> str:
 
 
 def load_episodes(path: str) -> list[dict]:
-    """Load episodes from JSONL checkpoint file."""
+    """Load episodes from JSONL checkpoint file.
+
+    Tolerates truncated final lines (e.g. from a crash mid-write).
+    """
     episodes = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 episodes.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"Warning: skipping malformed line in {path}")
+                break  # Truncated tail — stop processing
     return episodes

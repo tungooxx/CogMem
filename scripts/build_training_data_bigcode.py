@@ -15,15 +15,14 @@ from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_
 
 
 def q_to_copies(q_value: float, max_copies: int = 10) -> int:
-    """Lower Q = more copies for failed tasks. Higher Q = more copies for passed tasks.
+    """Map Q-value to training copy count.
 
-    For BigCodeBench (unlike ALFWorld), we weight SUCCESSFUL episodes more heavily,
-    since the model needs to learn correct code patterns.
-    Failed episodes still get included (1-3 copies) to learn what to avoid.
+    For BigCodeBench, successful episodes (q > 0) get max_copies since
+    the model needs to learn correct code patterns. Failed episodes
+    (q <= 0) get 1-3 copies to learn what to avoid.
     """
     if q_value > 0:
-        # Success: more copies for harder successes (lower positive Q)
-        return max(3, max_copies)  # All successes get high weight
+        return max(3, max_copies)
     else:
         # Failure: fewer copies, proportional to how badly it failed
         normalized = min(abs(q_value), 1.0)
