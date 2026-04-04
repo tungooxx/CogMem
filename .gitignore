@@ -19,3 +19,6 @@ adapters/
 results/memory_bank.json
 logs/
 *.tar.gz
+
+# Notebooks with outputs (may contain secrets)
+paperspace*.ipynb
