@@ -20,7 +20,7 @@ class CogMemConfig:
     # LoRA training
     lora_provider: str = "together"
     together_api_key: str = ""
-    base_model: str = "meta-llama/Llama-3.2-3B-Instruct"
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct"
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_epochs: int = 3
@@ -38,7 +38,7 @@ class CogMemConfig:
 
     # Evaluation
     eval_model_api_base: str = "http://localhost:11434/v1"
-    eval_model: str = "llama3.2:3b"
+    eval_model: str = "qwen2.5:3b"
 
     # Providers
     groq_api_key: str = ""
