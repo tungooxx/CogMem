@@ -124,7 +124,7 @@ def run_batch(
     total = len(tasks)
     done = len(completed_ids)
 
-    for i, task in enumerate(remaining):
+    for task in remaining:
         episode = run_single_task(
             task,
             llm_client,
