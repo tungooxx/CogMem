@@ -37,6 +37,7 @@ def build_training_data(memory_bank_path: str, output_path: str) -> str:
 
     training_data = []
     skipped = 0
+    successes = 0
 
     for ep in episodes:
         script = ep.get("script", "")
@@ -52,6 +53,8 @@ def build_training_data(memory_bank_path: str, output_path: str) -> str:
             skipped += 1
             continue
 
+        if ep.get("success"):
+            successes += 1
         copies = q_to_copies(ep.get("q_value", 0.0))
 
         # Format 1: With system prompt (matches inference format)
@@ -78,7 +81,6 @@ def build_training_data(memory_bank_path: str, output_path: str) -> str:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     used = len(episodes) - skipped
-    successes = sum(1 for ep in episodes if ep.get("success"))
     print(f"Episodes: {len(episodes)} total, {used} used, {skipped} skipped")
     print(f"Successes: {successes}, Failures: {used - successes}")
     print(f"Training examples: {len(training_data)} (System: {len(training_data)//2}, Raw: {len(training_data)//2})")

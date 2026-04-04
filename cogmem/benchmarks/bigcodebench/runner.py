@@ -163,8 +163,10 @@ def episodes_to_memory_bank(episodes: list[dict], output_path: str) -> str:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(episodes, f, indent=2, ensure_ascii=False)
+    total = len(episodes)
     passed = sum(1 for ep in episodes if ep["success"])
-    print(f"Memory bank: {len(episodes)} episodes, {passed} passed ({passed/len(episodes):.1%})")
+    rate = passed / total if total > 0 else 0.0
+    print(f"Memory bank: {total} episodes, {passed} passed ({rate:.1%})")
     return output_path
 
 
