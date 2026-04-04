@@ -1,9 +1,8 @@
-"""Build Phase 2 training data v4 — ALL expert trajectories + Q-weighted priorities.
+"""Build Phase 2 training data v4 — Q-weighted only, higher copies.
 
-- 248 Q-valued memories: 1-5 copies (Q-weighted)
-- 2,187 remaining expert games: 1 copy each (uniform)
-- Both in dual format (MemRL + raw)
-- More data = stronger Thought/Action behavior override
+Only uses the 248 Q-valued memories from Phase 1.
+Max copies increased to 10 (harder tasks trained 10x more).
+Dual format (MemRL + raw).
 
 Usage:
     python scripts/build_training_data_v4.py results/memory_bank.json results/training_v4.jsonl
@@ -36,14 +35,13 @@ Your response should use the following format:
 Thought: <your thoughts>
 Action: <your next action>"""
 
-TASK_TYPE_MAP = {
-    "look_at_obj_in_light": "examine",
-    "pick_clean_then_place_in_recep": "clean",
-    "pick_heat_then_place_in_recep": "heat",
-    "pick_cool_then_place_in_recep": "cool",
-    "pick_and_place_simple": "put",
-    "pick_two_obj_and_place": "puttwo",
-    "pick_and_place_with_movable_recep": "put",
+TASK_TYPE_TO_FOLDER = {
+    "examine": "look_at_obj_in_light",
+    "clean": "pick_clean_then_place_in_recep",
+    "heat": "pick_heat_then_place_in_recep",
+    "cool": "pick_cool_then_place_in_recep",
+    "pick": "pick_and_place_simple",
+    "puttwo": "pick_two_obj_and_place",
 }
 
 ACTION_MAP = {
@@ -93,10 +91,9 @@ def expert_to_full_plan(expert_actions):
     return "\n".join(lines)
 
 
-def load_all_expert_trajectories(alfworld_data_dir):
-    """Load ALL expert trajectories with task descriptions."""
+def load_expert_trajectories(alfworld_data_dir):
     train_dir = Path(alfworld_data_dir) / "json_2.1.1" / "train"
-    experts = []
+    experts = {}
     for game_dir in train_dir.iterdir():
         if not game_dir.is_dir():
             continue
@@ -110,22 +107,11 @@ def load_all_expert_trajectories(alfworld_data_dir):
             data = json.load(f)
         plan = data.get("plan", {}).get("high_pddl", [])
         actions = [p["discrete_action"] for p in plan]
-        task_desc = data.get("turk_annotations", {}).get("anns", [{}])[0].get("task_desc", "")
         folder_name = game_dir.name
-        # Get task type from folder name
-        prefix = folder_name.split("-")[0]
-        for full_prefix, short in TASK_TYPE_MAP.items():
-            if folder_name.startswith(full_prefix):
-                task_type = short
-                break
-        else:
-            task_type = "unknown"
-        experts.append({
-            "folder": folder_name,
-            "task_desc": task_desc,
-            "task_type": task_type,
-            "actions": actions,
-        })
+        prefix = re.sub(r"-\d+$", "", folder_name)
+        if prefix not in experts:
+            experts[prefix] = []
+        experts[prefix].append({"folder": folder_name, "actions": actions})
     return experts
 
 
@@ -135,88 +121,86 @@ def load_few_shot_examples(path):
     return {ex["task"]: ex["example"] for ex in examples}
 
 
-def q_to_copies(q_value, max_copies=5):
-    normalized = abs(q_value)
+def q_to_copies(q_value, max_copies=10):
+    """Lower Q = more copies. Max 10 copies for hardest tasks."""
+    normalized = abs(q_value)  # 0.0 to 0.88
     copies = 1 + int(normalized * (max_copies - 1) / 0.9)
     return min(copies, max_copies)
-
-
-def make_memrl_example(task_description, expert_actions, task_type, few_shot):
-    """Create MemRL format training example."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if task_type in few_shot:
-        example_copy = json.loads(json.dumps(few_shot[task_type]))
-        example_copy[0]["content"] = "Here is an example of how to solve the task:\n" + example_copy[0]["content"]
-        messages.extend(example_copy)
-    messages.append({
-        "role": "user",
-        "content": f"Now, it's your turn to solve a new task.\n{task_description}"
-    })
-    messages.append({"role": "assistant", "content": expert_to_first_action(expert_actions)})
-    return {"messages": messages}
-
-
-def make_raw_example(task_description, expert_actions):
-    """Create raw format training example."""
-    return {"messages": [
-        {"role": "user", "content": task_description},
-        {"role": "assistant", "content": expert_to_full_plan(expert_actions)},
-    ]}
 
 
 def build_training_data(memory_bank_path, alfworld_data_dir, few_shot_path, output_path):
     with open(memory_bank_path, encoding="utf-8") as f:
         memories = json.load(f)
-    q_task_descs = {m["task_description"] for m in memories}
 
-    print("Loading ALL expert trajectories...")
-    all_experts = load_all_expert_trajectories(alfworld_data_dir)
-    print(f"Loaded {len(all_experts)} expert trajectories")
+    print("Loading expert trajectories...")
+    experts = load_expert_trajectories(alfworld_data_dir)
+    print(f"Loaded {sum(len(v) for v in experts.values())} expert trajectories")
 
     few_shot = load_few_shot_examples(few_shot_path)
     training_data = []
+    matched = 0
 
-    # Part 1: Q-weighted memories matched to experts
-    q_matched = 0
     for mem in memories:
         task_type = mem["task_type"]
-        matching = [e for e in all_experts if e["task_type"] == task_type]
+        folder_prefix = TASK_TYPE_TO_FOLDER.get(task_type)
+        if not folder_prefix:
+            continue
+
+        matching = []
+        for prefix, trajs in experts.items():
+            if prefix.startswith(folder_prefix):
+                matching.extend(trajs)
         if not matching:
             continue
+
         idx = int(hashlib.md5(mem["episode_id"].encode()).hexdigest(), 16) % len(matching)
         expert = matching[idx]
         copies = q_to_copies(mem["q_value"])
+        first_action = expert_to_first_action(expert["actions"])
+        full_plan = expert_to_full_plan(expert["actions"])
+
+        # MemRL format
+        memrl_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if task_type in few_shot:
+            example_copy = json.loads(json.dumps(few_shot[task_type]))
+            example_copy[0]["content"] = "Here is an example of how to solve the task:\n" + example_copy[0]["content"]
+            memrl_messages.extend(example_copy)
+        memrl_messages.append({
+            "role": "user",
+            "content": f"Now, it's your turn to solve a new task.\n{mem['task_description']}"
+        })
+        memrl_messages.append({"role": "assistant", "content": first_action})
+
+        # Raw format
+        raw_messages = [
+            {"role": "user", "content": mem["task_description"]},
+            {"role": "assistant", "content": full_plan},
+        ]
+
         for _ in range(copies):
-            training_data.append(make_memrl_example(mem["task_description"], expert["actions"], task_type, few_shot))
-            training_data.append(make_raw_example(mem["task_description"], expert["actions"]))
-        q_matched += 1
+            training_data.append({"messages": memrl_messages})
+            training_data.append({"messages": raw_messages})
 
-    q_examples = len(training_data)
-    print(f"Q-weighted: {q_matched} tasks → {q_examples} examples")
-
-    # Part 2: All remaining expert trajectories (uniform weight, 1 copy each)
-    uniform_count = 0
-    for expert in all_experts:
-        # Build a task description from the expert data
-        task_desc = expert.get("task_desc", "")
-        if not task_desc:
-            continue
-        task_type = expert["task_type"]
-        training_data.append(make_memrl_example(task_desc, expert["actions"], task_type, few_shot))
-        training_data.append(make_raw_example(task_desc, expert["actions"]))
-        uniform_count += 1
-
-    uniform_examples = len(training_data) - q_examples
-    print(f"Uniform: {uniform_count} tasks → {uniform_examples} examples")
+        matched += 1
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         for item in training_data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    print(f"\nTotal: {len(training_data)} training examples")
-    print(f"  Q-weighted (prioritized): {q_examples}")
-    print(f"  Uniform (background): {uniform_examples}")
+    # Stats
+    copy_counts = {}
+    for mem in memories:
+        c = q_to_copies(mem["q_value"])
+        copy_counts[c] = copy_counts.get(c, 0) + 1
+
+    print(f"\nMatched: {matched}/{len(memories)}")
+    print(f"Total training examples: {len(training_data)}")
+    print(f"  MemRL format: {len(training_data)//2}")
+    print(f"  Raw format: {len(training_data)//2}")
+    print(f"Copy distribution:")
+    for copies, count in sorted(copy_counts.items()):
+        print(f"  {copies} copies: {count} tasks")
     print(f"Saved to {output_path}")
 
 
