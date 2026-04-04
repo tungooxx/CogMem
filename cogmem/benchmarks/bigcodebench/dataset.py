@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def load_bigcodebench(
-    subset: str = "v0.1.2",
+    subset: str = "v0.1.4",
     split: str = "full",
     hard_only: bool = False,
 ) -> list[dict]:
