@@ -31,7 +31,6 @@ def prepare_sft_dataset(
     high_episodes: list[dict],
     tokenizer,
     config,
-    benchmark: str = "bigcodebench",
 ) -> Dataset:
     """Convert high-Q episodes to tokenized SFT training data.
 
@@ -142,7 +141,7 @@ def train_sft_dora(
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    dataset = prepare_sft_dataset(high_episodes, tokenizer, config, benchmark)
+    dataset = prepare_sft_dataset(high_episodes, tokenizer, config)
     print(f"  Tokenized: {len(dataset)} examples")
 
     gc.collect()
@@ -171,7 +170,7 @@ def train_sft_dora(
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
     )
 
-    print(f"  Training SFT DoRA adapter...")
+    print("  Training SFT DoRA adapter...")
     trainer.train()
 
     model.save_pretrained(output_dir)

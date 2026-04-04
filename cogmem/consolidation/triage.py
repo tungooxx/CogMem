@@ -54,8 +54,6 @@ def select_anchors(
 
     Selects top episodes per task_type for diversity.
     """
-    rng = _random.Random(config.seed)
-
     if not high_episodes:
         return []
 
@@ -93,11 +91,17 @@ def split_holdout(
     Returns:
         (train_episodes, holdout_episodes)
     """
+    if not episodes:
+        return [], []
+
+    if len(episodes) == 1:
+        return list(episodes), []
+
     rng = _random.Random(seed)
     shuffled = list(episodes)
     rng.shuffle(shuffled)
 
-    n_holdout = max(1, int(len(shuffled) * fraction))
+    n_holdout = min(len(shuffled) - 1, max(1, int(len(shuffled) * fraction)))
     holdout = shuffled[:n_holdout]
     train = shuffled[n_holdout:]
     return train, holdout

@@ -41,19 +41,27 @@ from transformers import (
 def prepare_grpo_dataset(
     middle_episodes: list[dict],
     anchor_episodes: list[dict],
+    task_lookup: dict[str, dict] | None = None,
 ) -> Dataset:
     """Build dataset for GRPO. Only needs prompts — model generates solutions.
 
     Mixes middle-Q episodes (learning zone) with high-Q anchors (stability).
     Each row has a "prompt" column and metadata for reward computation.
+
+    Args:
+        middle_episodes: Episodes with Q in the learning zone.
+        anchor_episodes: High-Q episodes for stability.
+        task_lookup: Optional mapping of task_id -> original task dict
+            (with "test", "complete_prompt", "entry_point" fields).
+            If provided, enriches episodes that lack test metadata.
     """
     rows = []
 
     for ep in middle_episodes:
-        rows.append(_episode_to_grpo_row(ep, zone="middle"))
+        rows.append(_episode_to_grpo_row(ep, zone="middle", task_lookup=task_lookup))
 
     for ep in anchor_episodes:
-        rows.append(_episode_to_grpo_row(ep, zone="anchor"))
+        rows.append(_episode_to_grpo_row(ep, zone="anchor", task_lookup=task_lookup))
 
     print(
         f"  GRPO dataset: {len(rows)} problems "
@@ -62,17 +70,28 @@ def prepare_grpo_dataset(
     return Dataset.from_list(rows)
 
 
-def _episode_to_grpo_row(ep: dict, zone: str) -> dict:
+def _episode_to_grpo_row(
+    ep: dict, zone: str, task_lookup: dict[str, dict] | None = None,
+) -> dict:
     instruction = ep.get("task_description", "")
+    task_id = ep.get("task_id", ep.get("episode_id", ""))
+
+    # Episodes from Phase 1 typically lack test/complete_prompt fields.
+    # Fall back to task_lookup (original BigCodeBench tasks) if available.
+    task = (task_lookup or {}).get(task_id, {})
+    test_code = ep.get("test") or task.get("test", "")
+    complete_prompt = ep.get("complete_prompt") or task.get("complete_prompt", "")
+    entry_point = ep.get("entry_point") or task.get("entry_point", "")
+
     return {
         "prompt": _format_grpo_prompt(instruction),
-        "task_id": ep.get("task_id", ep.get("episode_id", "")),
+        "task_id": task_id,
         "zone": zone,
         "original_q": ep.get("q_value", 0.0),
         # Metadata for reward computation
-        "test_code": ep.get("test", ""),
-        "complete_prompt": ep.get("complete_prompt", ""),
-        "entry_point": ep.get("entry_point", ""),
+        "test_code": test_code,
+        "complete_prompt": complete_prompt,
+        "entry_point": entry_point,
         "task_type": ep.get("task_type", ""),
     }
 
@@ -413,8 +432,8 @@ def train_grpo_manual(
 
     model.train()
     step = 0
-    for epoch in range(config.grpo_epochs):
-        for i, row in enumerate(dataset):
+    for _epoch in range(config.grpo_epochs):
+        for _, row in enumerate(dataset):
             if step >= config.grpo_max_steps:
                 break
 
@@ -463,14 +482,14 @@ def train_grpo_manual(
                 outputs = model(**comp_ids, labels=comp_ids["input_ids"])
                 nll = outputs.loss
 
-                # GRPO loss: -advantage * log_prob
-                loss = -adv.to(model.device) * (-nll)
+                # GRPO loss: advantage * NLL (positive adv -> reduce NLL)
+                loss = adv.to(model.device) * nll
                 total_loss = total_loss + loss
                 n_updates += 1
 
             if n_updates > 0:
                 avg_loss = total_loss / n_updates
-                # KL penalty (simplified: regularize toward low loss)
+                # Regularization term (simplified; not a true KL penalty)
                 final_loss = avg_loss + config.grpo_beta * avg_loss.abs()
                 final_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -527,9 +546,9 @@ def train_grpo(
     """
     try:
         return train_grpo_trl(dataset, reward_fn, config, output_name)
-    except Exception as e:
+    except (ImportError, RuntimeError, ValueError) as e:
         print(f"  TRL GRPOTrainer failed: {e}")
-        print(f"  Falling back to manual GRPO implementation...")
+        print("  Falling back to manual GRPO implementation...")
         return train_grpo_manual(dataset, reward_fn, config, output_name)
 
 

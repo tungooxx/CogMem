@@ -141,10 +141,15 @@ class ConsolidationConfig:
     def __post_init__(self):
         if self.eval_seeds is None:
             self.eval_seeds = [42, 123, 456]
+        weight_sum = self.sft_weight + self.grpo_weight
+        if abs(weight_sum - 1.0) > 0.01:
+            raise ValueError(
+                f"sft_weight + grpo_weight must equal 1.0, got {weight_sum}"
+            )
 
     @classmethod
     def from_yaml(cls, path: str) -> "ConsolidationConfig":
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         valid_fields = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in valid_fields}

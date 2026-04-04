@@ -41,7 +41,7 @@ def merge_adapters(
     output_dir = str(Path(config.adapters_dir) / output_name)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    print(f"  Merging adapters:")
+    print("  Merging adapters:")
     print(f"    SFT:  {sft_adapter_path} (weight: {config.sft_weight})")
     print(f"    GRPO: {grpo_adapter_path} (weight: {config.grpo_weight})")
 
@@ -171,7 +171,7 @@ def _load_adapter_state(adapter_path: str) -> dict[str, torch.Tensor]:
         return load_file(safetensors_path, device="cpu")
 
     if os.path.exists(bin_path):
-        return torch.load(bin_path, map_location="cpu")
+        return torch.load(bin_path, map_location="cpu", weights_only=True)
 
     raise FileNotFoundError(
         f"No adapter weights found in {adapter_path}. "

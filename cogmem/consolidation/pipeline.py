@@ -120,7 +120,10 @@ def run_sleep_phase(
             reward_fn = create_bigcodebench_reward_fn(grpo_dataset)
         else:
             # ALFWorld: placeholder — use heuristic scoring
-            reward_fn = lambda completions, **kw: [0.5] * len(completions)
+            def _alfworld_placeholder_reward(completions, **kw):
+                return [0.5] * len(completions)
+
+            reward_fn = _alfworld_placeholder_reward
 
         grpo_path = train_grpo(
             grpo_dataset, reward_fn, config, output_name="grpo_dora"
@@ -150,8 +153,9 @@ def run_sleep_phase(
     else:
         print("  Skipped (no run_task_fn or no holdout)")
 
-    # 8. Tag consolidated episodes
-    consolidated_ids = {ep["episode_id"] for ep in zones["high"]}
+    # 8. Tag consolidated episodes (exclude holdout — those weren't trained on)
+    holdout_ids = {ep["episode_id"] for ep in holdout}
+    consolidated_ids = {ep["episode_id"] for ep in zones["high"]} - holdout_ids
     tag_consolidated(episodes, consolidated_ids, domain=benchmark)
     bank.save(memory_bank_path)
     print(f"\n8. Tagged {len(consolidated_ids)} high-Q episodes as consolidated")
@@ -258,16 +262,17 @@ def run_iterative_consolidation(
                 print(f"  Added {len(new_episodes)} new episodes "
                       f"(total: {len(current)})")
 
-        # Check for plateau
+        # Check for plateau (only when verification was actually run)
         if len(learning_curve) >= 3:
             recent_verif = [
-                p.get("verification", {}).get("mean", 0)
+                p.get("verification", {}).get("mean")
                 for p in learning_curve[-3:]
             ]
-            if all(v > 0 for v in recent_verif):
-                gain = recent_verif[-1] - recent_verif[-3]
+            valid = [v for v in recent_verif if v is not None and v > 0]
+            if len(valid) >= 3:
+                gain = valid[-1] - valid[0]
                 if gain < 0.01:
-                    print(f"\n  Plateau detected (gain < 1% over 3 cycles).")
+                    print("\n  Plateau detected (gain < 1% over 3 cycles).")
                     break
 
     # Save learning curve
