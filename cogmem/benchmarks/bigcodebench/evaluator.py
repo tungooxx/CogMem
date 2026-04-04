@@ -43,35 +43,31 @@ def evaluate_solution(
 
 
 def _build_test_script(task: dict, generated_code: str) -> str:
-    """Build a complete test script combining imports, solution, and tests."""
-    # The complete_prompt includes imports + function signature
-    # The generated code is the function body/implementation
-    # The test field contains unit tests
+    """Build a complete test script combining imports, solution, and tests.
 
+    BigCodeBench tests use unittest.TestCase classes (not a check() function).
+    We run them with unittest and print ALL_TESTS_PASSED on success.
+    """
     complete_prompt = task.get("complete_prompt", "")
     test_code = task.get("test", "")
-    entry_point = task.get("entry_point", "")
-    if not entry_point:
-        raise ValueError("Task missing 'entry_point' — cannot build test script")
 
-    # Build the full script:
-    # 1. The complete prompt (has imports + function signature)
-    # 2. The generated implementation
-    # 3. The test code
-    # 4. Run the test
     script = f"""{complete_prompt}
 {generated_code}
 
 {test_code}
 
-# Run the test
-import traceback
-try:
-    check({entry_point})
+# Run unittest and report result
+import unittest, sys
+loader = unittest.TestLoader()
+suite = loader.loadTestsFromTestCase(TestCases)
+runner = unittest.TextTestRunner(stream=sys.stderr, verbosity=0)
+result = runner.run(suite)
+if result.wasSuccessful():
     print("ALL_TESTS_PASSED")
-except Exception as e:
-    traceback.print_exc()
-    print(f"TEST_FAILED: {{e}}")
+else:
+    for failure in result.failures + result.errors:
+        print(f"TEST_FAILED: {{failure[1][:200]}}")
+    sys.exit(1)
 """
     return script
 

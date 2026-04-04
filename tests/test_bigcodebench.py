@@ -80,23 +80,23 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import _build_test_script
 
         task = {
-            "complete_prompt": "import os\ndef foo():",
-            "test": "def check(fn):\n    assert fn() == 42",
-            "entry_point": "foo",
+            "complete_prompt": "import os\ndef task_func():",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        self.assertEqual(task_func(), 42)",
+            "entry_point": "task_func",
         }
         script = _build_test_script(task, "    return 42")
         assert "import os" in script
         assert "return 42" in script
-        assert "check(foo)" in script
+        assert "TestCases" in script
         assert "ALL_TESTS_PASSED" in script
 
     def test_evaluate_solution_pass(self):
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 
         task = {
-            "complete_prompt": "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"",
-            "test": "def check(fn):\n    assert fn(1, 2) == 3\n    assert fn(0, 0) == 0",
-            "entry_point": "add",
+            "complete_prompt": "def task_func(a, b):\n    \"\"\"Add two numbers.\"\"\"",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(task_func(1, 2), 3)\n    def test_zero(self):\n        self.assertEqual(task_func(0, 0), 0)",
+            "entry_point": "task_func",
         }
         result = evaluate_solution(task, "    return a + b", timeout=10)
         assert result["passed"] is True
@@ -105,9 +105,9 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 
         task = {
-            "complete_prompt": "def add(a, b):\n    \"\"\"Add two numbers.\"\"\"",
-            "test": "def check(fn):\n    assert fn(1, 2) == 3",
-            "entry_point": "add",
+            "complete_prompt": "def task_func(a, b):\n    \"\"\"Add two numbers.\"\"\"",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(task_func(1, 2), 3)",
+            "entry_point": "task_func",
         }
         result = evaluate_solution(task, "    return a * b", timeout=10)
         assert result["passed"] is False
@@ -116,9 +116,9 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 
         task = {
-            "complete_prompt": "def slow():",
-            "test": "def check(fn):\n    fn()",
-            "entry_point": "slow",
+            "complete_prompt": "def task_func():",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        task_func()",
+            "entry_point": "task_func",
         }
         result = evaluate_solution(task, "    import time; time.sleep(100)", timeout=2)
         assert result["passed"] is False
@@ -128,9 +128,9 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 
         task = {
-            "complete_prompt": "def foo():",
-            "test": "def check(fn):\n    fn()",
-            "entry_point": "foo",
+            "complete_prompt": "def task_func():",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        task_func()",
+            "entry_point": "task_func",
         }
         result = evaluate_solution(task, "    return !!!invalid", timeout=10)
         assert result["passed"] is False
@@ -139,9 +139,9 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 
         task = {
-            "complete_prompt": "def foo():",
-            "test": "def check(fn):\n    fn()",
-            "entry_point": "foo",
+            "complete_prompt": "def task_func():",
+            "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        task_func()",
+            "entry_point": "task_func",
         }
         with pytest.raises(ValueError, match="Unknown eval mode"):
             evaluate_solution(task, "    pass", mode="typo")
@@ -150,8 +150,8 @@ class TestEvaluator:
         from cogmem.benchmarks.bigcodebench.evaluator import evaluate_batch
 
         tasks = [
-            {"task_id": "t1", "complete_prompt": "def a():", "test": "def check(fn):\n    assert fn() == 1", "entry_point": "a"},
-            {"task_id": "t2", "complete_prompt": "def b():", "test": "def check(fn):\n    assert fn() == 2", "entry_point": "b"},
+            {"task_id": "t1", "complete_prompt": "def task_func():", "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        self.assertEqual(task_func(), 1)", "entry_point": "task_func"},
+            {"task_id": "t2", "complete_prompt": "def task_func():", "test": "import unittest\nclass TestCases(unittest.TestCase):\n    def test_it(self):\n        self.assertEqual(task_func(), 2)", "entry_point": "task_func"},
         ]
         solutions = {"t1": "    return 1", "t2": "    return 999"}
         result = evaluate_batch(tasks, solutions, timeout=10)
