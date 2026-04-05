@@ -71,7 +71,7 @@ class CogMemConfig:
     generator_sft_lr: float = 1e-4
     generator_batch_size: int = 4
     generator_max_seq_length: int = 2048
-    quantization_bits: int = 4
+    quantization_bits: int = 8  # 8-bit required: DoRA incompatible with 4-bit Linear4bit
     use_dora: bool = True
 
     # --- Generator DoRA: Stage 2 (DPO) ---
