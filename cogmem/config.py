@@ -40,8 +40,8 @@ class CogMemConfig:
     general_model_ollama: str = "qwen2.5:3b"
     general_model_hf: str = "Qwen/Qwen2.5-3B-Instruct"
     # Active model (set to either coder or general for each run)
-    active_model_ollama: str = "qwen2.5-coder:3b"
-    active_model_hf: str = "Qwen/Qwen2.5-Coder-3B-Instruct"
+    active_model_ollama: str = "qwen2.5:3b"
+    active_model_hf: str = "Qwen/Qwen2.5-3B-Instruct"
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # --- Curriculum learning (for general model) ---
