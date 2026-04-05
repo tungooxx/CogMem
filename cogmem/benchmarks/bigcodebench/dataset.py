@@ -5,15 +5,15 @@ from pathlib import Path
 
 
 def load_bigcodebench(
-    subset: str = "v0.1.4",
-    split: str = "full",
+    version: str = "v0.1.4",
     hard_only: bool = False,
 ) -> list[dict]:
     """Load BigCodeBench tasks from HuggingFace datasets.
 
+    BigCodeBench uses the version string as the split name (not a config).
+
     Args:
-        subset: Dataset version/subset.
-        split: Which split to load.
+        version: Dataset version, used as the split name (e.g., "v0.1.4").
         hard_only: If True, load only BigCodeBench-Hard (148 tasks).
 
     Returns:
@@ -22,10 +22,8 @@ def load_bigcodebench(
     """
     from datasets import load_dataset
 
-    if hard_only:
-        ds = load_dataset("bigcode/bigcodebench-hard", subset, split=split)
-    else:
-        ds = load_dataset("bigcode/bigcodebench", subset, split=split)
+    repo = "bigcode/bigcodebench-hard" if hard_only else "bigcode/bigcodebench"
+    ds = load_dataset(repo, split=version)
 
     tasks = []
     for item in ds:

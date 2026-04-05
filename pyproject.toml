@@ -23,5 +23,8 @@ dependencies = [
 dev = ["pytest>=7.0", "pytest-mock>=3.10"]
 alfworld = ["alfworld>=0.3"]
 
+[tool.setuptools.packages.find]
+include = ["cogmem*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
