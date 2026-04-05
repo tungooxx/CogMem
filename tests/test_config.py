@@ -8,7 +8,7 @@ def test_default_config():
     assert cfg.lora_rank == 16
     assert cfg.lora_alpha == 32
     assert cfg.lora_epochs == 3
-    assert cfg.base_model == "Qwen/Qwen2.5-3B-Instruct"
+    assert cfg.base_model == "Qwen/Qwen2.5-Coder-3B-Instruct"
     assert cfg.verification_holdout == 20
     assert cfg.regression_threshold == 0.05
 
