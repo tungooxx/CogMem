@@ -67,7 +67,7 @@ class CogMemConfig:
     generator_rank: int = 16
     generator_alpha: int = 32
     generator_dropout: float = 0.05
-    generator_sft_epochs: int = 3
+    generator_sft_epochs: int = 10
     generator_sft_lr: float = 1e-4
     generator_batch_size: int = 4
     generator_max_seq_length: int = 2048
@@ -75,7 +75,7 @@ class CogMemConfig:
     use_dora: bool = True
 
     # --- Generator DoRA: Stage 2 (DPO) ---
-    generator_dpo_epochs: int = 2
+    generator_dpo_epochs: int = 6
     generator_dpo_lr: float = 5e-5
     generator_dpo_beta: float = 0.1
     min_dpo_pairs: int = 10
@@ -84,10 +84,14 @@ class CogMemConfig:
     verifier_rank: int = 16
     verifier_alpha: int = 32
     verifier_dropout: float = 0.05
-    verifier_epochs: int = 2
+    verifier_epochs: int = 6
     verifier_lr: float = 5e-5
     verifier_beta: float = 0.1
     min_q_gap: float = 0.2
+
+    # --- Early stopping (critical for small datasets) ---
+    early_stopping_patience: int = 3
+    eval_steps: int = 20
 
     # --- Verifier-guided generation ---
     num_candidates: int = 8
