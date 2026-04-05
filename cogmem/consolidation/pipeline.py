@@ -1,13 +1,12 @@
-"""Consolidation pipeline — orchestrates the full "sleep" phase.
+"""Consolidation pipeline — orchestrates the "sleep" phase.
 
 Two pipeline modes:
 
 1. **Experiment 1 (legacy)**: Compare 5 selection policies for SFT-only.
    Uses: select.py -> abstract.py -> train_lora*.py -> verify.py
 
-2. **Sleep phase (new)**: Q-value triage -> SFT + GRPO + merge.
-   Uses: triage.py -> sft_train.py + grpo_train.py -> merge.py -> verify.py
-   This is the core CogMem novelty.
+2. **Sleep phase**: Q-value triage -> SFT DoRA -> verify.
+   Uses: triage.py -> sft_train.py -> verify.py
 """
 
 import json
@@ -17,16 +16,10 @@ from statistics import mean
 
 from cogmem.config import CogMemConfig, ConsolidationConfig
 from cogmem.consolidation.abstract import prepare_training_dataset, save_as_jsonl
-from cogmem.consolidation.grpo_train import (
-    create_bigcodebench_reward_fn,
-    prepare_grpo_dataset,
-    train_grpo,
-)
-from cogmem.consolidation.merge import merge_adapters
 from cogmem.consolidation.prune import tag_consolidated
 from cogmem.consolidation.select import POLICIES
 from cogmem.consolidation.sft_train import train_sft_dora
-from cogmem.consolidation.triage import select_anchors, split_holdout, triage_episodes
+from cogmem.consolidation.triage import split_holdout, triage_episodes
 from cogmem.consolidation.verify import (
     aggregate_seed_results,
     run_verification_single_seed,
@@ -46,17 +39,15 @@ def run_sleep_phase(
     benchmark: str = "bigcodebench",
     run_task_fn=None,
 ) -> dict:
-    """Run the full Q-value triage consolidation pipeline.
+    """Run the consolidation pipeline: triage -> SFT DoRA -> verify.
 
     Steps:
         1. Load memory bank
         2. Triage episodes by Q-value zone
         3. Split holdout from high-Q zone
-        4. Step A: SFT DoRA on high-Q episodes (memorize patterns)
-        5. Step B: GRPO DoRA on middle-Q episodes (practice reasoning)
-        6. Step C: Merge both adapters
-        7. Verify merged adapter on holdout
-        8. Tag consolidated episodes
+        4. SFT DoRA on high-Q episodes
+        5. Verify adapter on holdout
+        6. Tag consolidated episodes
 
     Args:
         memory_bank_path: Path to memory bank JSON.
@@ -66,7 +57,7 @@ def run_sleep_phase(
             for holdout verification. If None, verification is skipped.
 
     Returns:
-        Dict with triage stats, adapter paths, verification results.
+        Dict with triage stats, adapter path, verification results.
     """
     print("=" * 60)
     print(f"COGMEM SLEEP PHASE — {benchmark.upper()}")
@@ -79,64 +70,27 @@ def run_sleep_phase(
     print(f"\n1. Loaded memory bank: {len(episodes)} episodes")
 
     # 2. Triage
-    print(f"\n2. Q-value triage:")
+    print("\n2. Q-value triage:")
     zones = triage_episodes(episodes, config)
 
     # 3. Split holdout from high-Q
-    print(f"\n3. Holdout split:")
+    print("\n3. Holdout split:")
     high_train, holdout = split_holdout(
         zones["high"], fraction=config.holdout_fraction, seed=config.seed
     )
     print(f"  High-Q for SFT: {len(high_train)}")
     print(f"  Holdout for verification: {len(holdout)}")
 
-    anchors = select_anchors(zones["high"], config)
-
-    # 4. Step A: SFT on high-Q
+    # 4. SFT DoRA on high-Q
     print(f"\n{'=' * 60}")
-    print("STEP A: SFT DoRA on high-Q episodes")
+    print("SFT DoRA on high-Q episodes")
     print("=" * 60)
 
     sft_path, sft_loss = train_sft_dora(
         high_train, config, benchmark=benchmark, output_name="sft_dora"
     )
 
-    # 5. Step B: GRPO on middle-Q
-    print(f"\n{'=' * 60}")
-    print("STEP B: GRPO DoRA on middle-Q episodes")
-    print("=" * 60)
-
-    grpo_path = None
-    merged_path = sft_path  # default: SFT-only if GRPO skipped
-
-    if len(zones["middle"]) < config.grpo_min_episodes:
-        print(f"  Only {len(zones['middle'])} middle-Q episodes "
-              f"(need >= {config.grpo_min_episodes})")
-        print("  Skipping GRPO — using SFT adapter only.")
-    else:
-        grpo_dataset = prepare_grpo_dataset(zones["middle"], anchors)
-
-        if benchmark == "bigcodebench":
-            reward_fn = create_bigcodebench_reward_fn(grpo_dataset)
-        else:
-            # ALFWorld: placeholder — use heuristic scoring
-            def _alfworld_placeholder_reward(completions, **kw):
-                return [0.5] * len(completions)
-
-            reward_fn = _alfworld_placeholder_reward
-
-        grpo_path = train_grpo(
-            grpo_dataset, reward_fn, config, output_name="grpo_dora"
-        )
-
-        # 6. Step C: Merge
-        print(f"\n{'=' * 60}")
-        print("STEP C: Merge SFT + GRPO adapters")
-        print("=" * 60)
-
-        merged_path = merge_adapters(sft_path, grpo_path, config)
-
-    # 7. Verify
+    # 5. Verify
     print(f"\n{'=' * 60}")
     print("VERIFICATION")
     print("=" * 60)
@@ -148,17 +102,17 @@ def run_sleep_phase(
             r = run_verification_single_seed(holdout, run_task_fn, seed)
             seed_results.append(r)
         verification = aggregate_seed_results(seed_results)
-        print(f"  Merged adapter: {verification['mean']:.1%} "
+        print(f"  SFT adapter: {verification['mean']:.1%} "
               f"(+/- {verification['std']:.1%})")
     else:
         print("  Skipped (no run_task_fn or no holdout)")
 
-    # 8. Tag consolidated episodes (exclude holdout — those weren't trained on)
+    # 6. Tag consolidated episodes (exclude holdout)
     holdout_ids = {ep["episode_id"] for ep in holdout}
     consolidated_ids = {ep["episode_id"] for ep in zones["high"]} - holdout_ids
     tag_consolidated(episodes, consolidated_ids, domain=benchmark)
     bank.save(memory_bank_path)
-    print(f"\n8. Tagged {len(consolidated_ids)} high-Q episodes as consolidated")
+    print(f"\n6. Tagged {len(consolidated_ids)} high-Q episodes as consolidated")
 
     # Save results
     results = {
@@ -174,11 +128,6 @@ def run_sleep_phase(
             "training_episodes": len(high_train),
             "final_loss": sft_loss,
         },
-        "grpo": {
-            "path": grpo_path,
-            "practice_problems": len(zones["middle"]) if grpo_path else 0,
-        },
-        "merged": {"path": merged_path},
         "verification": verification,
     }
 
@@ -190,11 +139,9 @@ def run_sleep_phase(
 
     print(f"\n{'=' * 60}")
     print("SLEEP PHASE COMPLETE")
-    print(f"  SFT adapter:    {sft_path}")
-    print(f"  GRPO adapter:   {grpo_path}")
-    print(f"  Merged adapter: {merged_path}")
+    print(f"  SFT adapter: {sft_path}")
     if verification:
-        print(f"  Holdout rate:   {verification['mean']:.1%}")
+        print(f"  Holdout rate: {verification['mean']:.1%}")
     print("=" * 60)
 
     return results
@@ -208,24 +155,13 @@ def run_iterative_consolidation(
     run_task_fn=None,
     max_cycles: int = 8,
 ) -> list[dict]:
-    """Run multiple sleep cycles. Each cycle:
+    """Run multiple sleep cycles.
 
-    1. Run sleep phase (SFT + GRPO + merge)
-    2. Optionally collect new episodes with improved model
-    3. Track learning curve
-    4. Stop on plateau
-
-    Args:
-        memory_bank_path: Path to memory bank JSON.
-        config: ConsolidationConfig.
-        benchmark: "bigcodebench" or "alfworld".
-        collect_fn: Optional callable(adapter_path) -> list[dict].
-            Collects new episodes using the improved model.
-        run_task_fn: Optional callable for verification.
-        max_cycles: Maximum number of consolidation cycles.
-
-    Returns:
-        Learning curve: list of dicts with per-cycle metrics.
+    Each cycle:
+        1. Run sleep phase (SFT DoRA)
+        2. Optionally collect new episodes with improved model
+        3. Track learning curve
+        4. Stop on plateau
     """
     learning_curve = []
 
@@ -234,25 +170,23 @@ def run_iterative_consolidation(
         print(f"# CYCLE {cycle} / {max_cycles}")
         print(f"{'#' * 60}")
 
-        # Run sleep phase
         results = run_sleep_phase(
             memory_bank_path, config, benchmark, run_task_fn
         )
 
-        # Record learning curve
         point = {
             "cycle": cycle,
             "triage": results["triage"],
             "sft_loss": results["sft"].get("final_loss"),
-            "merged_path": results["merged"]["path"],
+            "sft_path": results["sft"]["path"],
             "verification": results.get("verification", {}),
         }
         learning_curve.append(point)
 
         # Optionally collect new episodes with improved model
         if collect_fn is not None:
-            print(f"\n  Collecting new episodes with improved model...")
-            new_episodes = collect_fn(results["merged"]["path"])
+            print("\n  Collecting new episodes with improved model...")
+            new_episodes = collect_fn(results["sft"]["path"])
             if new_episodes:
                 bank = MemoryBank.load(memory_bank_path)
                 current = list(bank)
@@ -286,13 +220,12 @@ def run_iterative_consolidation(
     print(f"\n{'=' * 60}")
     print("ITERATIVE CONSOLIDATION COMPLETE")
     print("=" * 60)
-    print(f"{'Cycle':<8} {'SFT Loss':<12} {'High-Q':<10} {'Middle-Q':<10}")
-    print("-" * 40)
+    print(f"{'Cycle':<8} {'SFT Loss':<12} {'High-Q':<10}")
+    print("-" * 30)
     for p in learning_curve:
         loss = p.get("sft_loss")
         loss_str = f"{loss:.3f}" if loss else "N/A"
-        print(f"{p['cycle']:<8} {loss_str:<12} "
-              f"{p['triage']['high']:<10} {p['triage']['middle']:<10}")
+        print(f"{p['cycle']:<8} {loss_str:<12} {p['triage']['high']:<10}")
 
     return learning_curve
 

@@ -69,13 +69,11 @@ class CogMemConfig:
 
 @dataclass
 class ConsolidationConfig:
-    """Config for the Q-value triage consolidation pipeline.
+    """Config for the consolidation pipeline.
 
-    The key innovation: Q-values route episodes to different training
-    objectives during the "sleep" phase:
-      - High Q (>= q_high_threshold):  SFT/DoRA  (memorize patterns)
-      - Middle Q (q_mid_low .. q_high): GRPO RL   (practice reasoning)
-      - Low Q (< q_mid_low):            Keep as episodic memory
+    Q-values weight how episodes are used during SFT/DoRA training.
+    Higher Q episodes get more copies (Q-weighted duplication).
+    Low Q episodes are kept as episodic memory only.
     """
 
     # --- Paths ---
@@ -83,7 +81,7 @@ class ConsolidationConfig:
     adapters_dir: str = "adapters/"
     experiments_dir: str = "results/experiments/"
 
-    # --- Q-value triage thresholds ---
+    # --- Q-value thresholds ---
     q_high_threshold: float = 0.7
     q_mid_low: float = 0.3
 
@@ -92,7 +90,7 @@ class ConsolidationConfig:
     # 4-bit (Linear4bit) is broken with DoRA in peft <= 0.13.
     quantization_bits: int = 8
 
-    # --- SFT (Step A) — DoRA on high-Q ---
+    # --- SFT DoRA training ---
     sft_lora_rank: int = 16
     sft_lora_alpha: int = 32
     sft_lora_dropout: float = 0.05
@@ -103,32 +101,6 @@ class ConsolidationConfig:
     sft_max_seq_length: int = 2048
     sft_use_dora: bool = True
     sft_early_stop_loss: float = 0.8
-
-    # --- GRPO (Step B) — RL on middle-Q ---
-    grpo_lora_rank: int = 16
-    grpo_lora_alpha: int = 32
-    grpo_lora_dropout: float = 0.05
-    grpo_lr: float = 5e-6
-    grpo_group_size: int = 4
-    grpo_epochs: int = 1
-    grpo_max_steps: int = 200
-    grpo_beta: float = 0.1
-    grpo_max_completion_length: int = 1024
-    grpo_temperature: float = 0.8
-    grpo_use_dora: bool = True
-    grpo_min_episodes: int = 5
-
-    # --- Reward ---
-    reward_type: str = "continuous"
-
-    # --- Merge (Step C) ---
-    merge_method: str = "weighted_average"
-    sft_weight: float = 0.6
-    grpo_weight: float = 0.4
-
-    # --- Anchor episodes for GRPO stability ---
-    grpo_anchor_count: int = 10
-    grpo_anchor_fraction: float = 0.2
 
     # --- Verification ---
     holdout_fraction: float = 0.15
@@ -141,11 +113,6 @@ class ConsolidationConfig:
     def __post_init__(self):
         if self.eval_seeds is None:
             self.eval_seeds = [42, 123, 456]
-        weight_sum = self.sft_weight + self.grpo_weight
-        if abs(weight_sum - 1.0) > 0.01:
-            raise ValueError(
-                f"sft_weight + grpo_weight must equal 1.0, got {weight_sum}"
-            )
 
     @classmethod
     def from_yaml(cls, path: str) -> "ConsolidationConfig":

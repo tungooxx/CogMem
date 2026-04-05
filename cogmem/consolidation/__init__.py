@@ -1,7 +1,7 @@
-"""CogMem consolidation — Q-value triage sleep pipeline.
+"""CogMem consolidation — Q-value weighted SFT/DoRA sleep pipeline.
 
-Core pipeline (new):
-    triage -> sft_train + grpo_train -> merge -> verify
+Core pipeline:
+    triage -> sft_train -> verify
 
 Legacy pipeline:
     select -> abstract -> train_lora -> verify

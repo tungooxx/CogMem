@@ -43,43 +43,6 @@ def triage_episodes(
     return zones
 
 
-def select_anchors(
-    high_episodes: list[dict],
-    config,
-) -> list[dict]:
-    """Select diverse anchor episodes from high-Q zone for GRPO stability.
-
-    During GRPO training, high-Q anchors are mixed in to prevent the
-    model from forgetting what it already knows (catastrophic forgetting).
-
-    Selects top episodes per task_type for diversity.
-    """
-    if not high_episodes:
-        return []
-
-    target = min(config.grpo_anchor_count, len(high_episodes))
-
-    # Group by task_type for diversity
-    by_type: dict[str, list[dict]] = {}
-    for ep in high_episodes:
-        key = ep.get("task_type", "general")
-        by_type.setdefault(key, []).append(ep)
-
-    # Take top-Q episodes from each type
-    anchors = []
-    per_type = max(1, target // max(len(by_type), 1))
-
-    for _type, eps in by_type.items():
-        sorted_eps = sorted(eps, key=lambda x: x.get("q_value", 0), reverse=True)
-        anchors.extend(sorted_eps[:per_type])
-
-    # Trim to target, keeping highest Q
-    anchors = sorted(anchors, key=lambda x: x.get("q_value", 0), reverse=True)
-    anchors = anchors[:target]
-
-    print(f"  Selected {len(anchors)} anchor episodes for GRPO stability")
-    return anchors
-
 
 def split_holdout(
     episodes: list[dict],
