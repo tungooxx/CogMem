@@ -2,10 +2,11 @@
 
 Two dataset types:
 1. SFT dataset: high-Q episodes -> (instruction, response) pairs
-2. DPO preference dataset: Q-value pairs -> (prompt, chosen, rejected)
+2. DPO preference dataset: three sources of pairs that work from Cycle 0
 """
 
 import json
+import random as _random
 from pathlib import Path
 
 import numpy as np
@@ -72,115 +73,122 @@ def save_as_jsonl(pairs: list[dict], path: str) -> str:
 
 
 # -------------------------------------------------------------------------
-# DPO preference pairs from Q-values
+# DPO preference pairs — works from Cycle 0
 # -------------------------------------------------------------------------
 
 def prepare_preference_dataset(
     all_episodes: list[dict],
     config,
 ) -> list[dict]:
-    """Create DPO preference pairs from Q-value differences.
+    """Generate DPO preference pairs. Works for ALL cycles.
 
-    For episodes about similar tasks with different Q-values:
-    - High-Q code is "chosen"
-    - Low-Q code is "rejected"
-    - Q-value gap = preference strength
-
-    This teaches the model to distinguish good code from bad code.
+    Three pairing strategies:
+      Source 1: Within-episode (attempt that passed vs attempt that failed)
+      Source 2: Same-domain (successful code vs failed code, same domain)
+      Source 3: Same-task across cycles (only available cycle 1+)
     """
-    # Group episodes by task_id (exact match — same task, different attempts)
-    by_task: dict[str, list[dict]] = {}
-    for ep in all_episodes:
-        key = ep.get("task_id", ep.get("episode_id", ""))
-        by_task.setdefault(key, []).append(ep)
-
-    # Also group by embedding similarity for cross-task pairs
-    clusters = _cluster_by_embedding(all_episodes, config)
-
-    preference_pairs = []
-
-    # First: exact task matches (strongest signal)
-    for task_id, eps in by_task.items():
-        pairs = _make_pairs_from_group(eps, config)
-        preference_pairs.extend(pairs)
-
-    # Second: embedding-similar tasks (weaker but more pairs)
-    for cluster in clusters:
-        if len(cluster) < 2:
-            continue
-        pairs = _make_pairs_from_group(cluster, config)
-        # Avoid duplicates from exact matches
-        existing = {(p["prompt"][:100], p["chosen"][:100]) for p in preference_pairs}
-        for p in pairs:
-            key = (p["prompt"][:100], p["chosen"][:100])
-            if key not in existing:
-                preference_pairs.append(p)
-                existing.add(key)
-
-    print(f"  Preference pairs: {len(preference_pairs)} "
-          f"(from {len(all_episodes)} episodes)")
-    return preference_pairs
-
-
-def _make_pairs_from_group(
-    episodes: list[dict], config,
-) -> list[dict]:
-    """Create chosen/rejected pairs from a group of episodes."""
-    eps_with_code = []
-    for ep in episodes:
-        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
-        if code and len(code.strip()) > 10:
-            eps_with_code.append((ep, code))
-
-    if len(eps_with_code) < 2:
-        return []
-
-    # Sort by Q-value descending
-    eps_with_code.sort(key=lambda x: x[0].get("q_value", 0), reverse=True)
-
+    rng = _random.Random(config.seed)
     pairs = []
-    for i, (winner, winner_code) in enumerate(eps_with_code):
-        for loser, loser_code in eps_with_code[i + 1:]:
-            q_gap = winner.get("q_value", 0) - loser.get("q_value", 0)
-            if q_gap < config.min_q_gap:
+
+    # ═══ Source 1: Within-episode pairs ═══
+    # Task had multiple attempts: final success vs earlier failure
+    within_count = 0
+    for ep in all_episodes:
+        trajectory = ep.get("trajectory", [])
+        if len(trajectory) < 2 or not ep.get("success"):
+            continue
+
+        chosen_code = ep.get("final_code") or ep.get("generated_code")
+        if not chosen_code:
+            continue
+
+        # First attempt is usually the failure
+        rejected_code = trajectory[0].get("code", "")
+
+        if (rejected_code
+                and len(rejected_code) > 20
+                and chosen_code != rejected_code):
+            pairs.append({
+                "prompt": ep.get("task_description", ""),
+                "chosen": chosen_code,
+                "rejected": rejected_code,
+            })
+            within_count += 1
+
+    # ═══ Source 2: Same-domain pairs ═══
+    # Good code vs bad code from the same domain (e.g., both do pandas work)
+    successes_by_domain: dict[str, list[dict]] = {}
+    failures_by_domain: dict[str, list[tuple[dict, str]]] = {}
+
+    for ep in all_episodes:
+        domain = ep.get("domain", "general")
+        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
+        if not code or len(code.strip()) <= 20:
+            continue
+
+        if ep.get("success"):
+            successes_by_domain.setdefault(domain, []).append(ep)
+        else:
+            failures_by_domain.setdefault(domain, []).append((ep, code))
+
+    domain_count = 0
+    for domain, winners in successes_by_domain.items():
+        losers = failures_by_domain.get(domain, [])
+        if not losers:
+            continue
+
+        for winner in winners:
+            winner_code = (winner.get("final_code")
+                           or winner.get("generated_code")
+                           or winner.get("script"))
+            if not winner_code:
                 continue
 
+            sampled = losers if len(losers) <= 3 else rng.sample(losers, 3)
+            for loser_ep, loser_code in sampled:
+                pairs.append({
+                    "prompt": winner.get("task_description", ""),
+                    "chosen": winner_code,
+                    "rejected": loser_code,
+                })
+                domain_count += 1
+
+    # ═══ Source 3: Same-task across cycles (cycle 1+ only) ═══
+    tasks_by_id: dict[str, list[dict]] = {}
+    for ep in all_episodes:
+        task_id = ep.get("task_id", ep.get("episode_id", ""))
+        tasks_by_id.setdefault(task_id, []).append(ep)
+
+    cross_cycle_count = 0
+    for task_id, eps in tasks_by_id.items():
+        if len(eps) < 2:
+            continue
+
+        eps.sort(key=lambda x: x.get("q_value", 0), reverse=True)
+        best = eps[0]
+        worst = eps[-1]
+
+        if best.get("q_value", 0) - worst.get("q_value", 0) < config.min_q_gap:
+            continue
+
+        best_code = (best.get("final_code")
+                     or best.get("generated_code")
+                     or best.get("script"))
+        worst_code = (worst.get("final_code")
+                      or worst.get("generated_code")
+                      or worst.get("script"))
+
+        if best_code and worst_code and len(worst_code) > 20:
             pairs.append({
-                "prompt": winner.get("task_description", ""),
-                "chosen": winner_code,
-                "rejected": loser_code,
+                "prompt": best.get("task_description", ""),
+                "chosen": best_code,
+                "rejected": worst_code,
             })
+            cross_cycle_count += 1
+
+    print(f"  DPO pairs total: {len(pairs)}")
+    print(f"    Within-episode:  {within_count}")
+    print(f"    Same-domain:     {domain_count}")
+    print(f"    Cross-cycle:     {cross_cycle_count}")
 
     return pairs
-
-
-def _cluster_by_embedding(
-    episodes: list[dict], config, threshold: float = 0.75,
-) -> list[list[dict]]:
-    """Group episodes by embedding similarity."""
-    # Only use episodes that have embeddings
-    with_emb = [ep for ep in episodes if ep.get("intent_embedding")]
-    if len(with_emb) < 2:
-        return []
-
-    try:
-        from sklearn.cluster import AgglomerativeClustering
-
-        embeddings = np.array([ep["intent_embedding"] for ep in with_emb])
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=1 - threshold,
-            metric="cosine",
-            linkage="average",
-        )
-        labels = clustering.fit_predict(embeddings)
-
-        clusters: dict[int, list[dict]] = {}
-        for ep, label in zip(with_emb, labels):
-            clusters.setdefault(label, []).append(ep)
-
-        return list(clusters.values())
-
-    except ImportError:
-        # sklearn not available — skip embedding clustering
-        return []
