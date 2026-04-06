@@ -80,14 +80,15 @@ def prepare_preference_dataset(
     all_episodes: list[dict],
     config,
 ) -> list[dict]:
-    """Generate DPO preference pairs. Works for ALL cycles.
+    """Generate DPO preference pairs from real experience.
 
-    Three pairing strategies:
-      Source 1: Within-episode (attempt that passed vs attempt that failed)
-      Source 2: Same-domain (successful code vs failed code, same domain)
-      Source 3: Same-task across cycles (only available cycle 1+)
+    Two sources — both from the model's actual task attempts:
+      Source 1: Within-episode (passed attempt vs failed attempt, same task)
+      Source 2: Cross-cycle (same task, different cycles with different outcomes)
+
+    Cycle 0: pairs come from within-episode retries (if any).
+    Cycle 1+: cross-cycle pairs appear as the model re-attempts tasks.
     """
-    rng = _random.Random(config.seed)
     pairs = []
 
     # ═══ Source 1: Within-episode pairs ═══
@@ -115,30 +116,8 @@ def prepare_preference_dataset(
             })
             within_count += 1
 
-    # ═══ Source 2: Success vs failure pairs (random sampling) ═══
-    successes = []
-    failures = []
-    for ep in all_episodes:
-        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
-        if not code or len(code.strip()) <= 20:
-            continue
-        if ep.get("success"):
-            successes.append((ep, code))
-        else:
-            failures.append((ep, code))
-
-    direct_count = 0
-    for winner_ep, winner_code in successes:
-        sampled = failures if len(failures) <= 3 else rng.sample(failures, 3)
-        for loser_ep, loser_code in sampled:
-            pairs.append({
-                "prompt": winner_ep.get("task_description", ""),
-                "chosen": winner_code,
-                "rejected": loser_code,
-            })
-            direct_count += 1
-
-    # ═══ Source 3: Same-task across cycles (cycle 1+ only) ═══
+    # ═══ Source 2: Same-task across cycles (cycle 1+ only) ═══
+    # Real experience: model attempted same task in different cycles
     tasks_by_id: dict[str, list[dict]] = {}
     for ep in all_episodes:
         task_id = ep.get("task_id", ep.get("episode_id", ""))
@@ -173,7 +152,6 @@ def prepare_preference_dataset(
 
     print(f"  DPO pairs total: {len(pairs)}")
     print(f"    Within-episode:  {within_count}")
-    print(f"    Success-vs-fail: {direct_count}")
     print(f"    Cross-cycle:     {cross_cycle_count}")
 
     return pairs
