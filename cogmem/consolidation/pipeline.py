@@ -1,12 +1,13 @@
-"""Consolidation pipeline — orchestrates the "sleep" phase.
+"""Q-STaR consolidation pipeline.
 
-Two pipeline modes:
+Orchestrates the full "sleep" phase:
+1. Select high-Q episodes
+2. Build preference pairs from Q-value differences
+3. Train generator DoRA (SFT on high-Q, then DPO on Q-value pairs)
+4. Train verifier DoRA (DPO on same Q-value pairs)
+5. Evaluate
 
-1. **Experiment 1 (legacy)**: Compare 5 selection policies for SFT-only.
-   Uses: select.py -> abstract.py -> train_lora*.py -> verify.py
-
-2. **Sleep phase**: Q-value triage -> SFT DoRA -> verify.
-   Uses: triage.py -> sft_train.py -> verify.py
+Also preserves legacy Experiment 1/2 pipelines for backward compat.
 """
 
 import json
@@ -14,12 +15,17 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean
 
-from cogmem.config import CogMemConfig, ConsolidationConfig
-from cogmem.consolidation.abstract import prepare_training_dataset, save_as_jsonl
-from cogmem.consolidation.prune import tag_consolidated
+from datasets import Dataset
+
+from cogmem.config import CogMemConfig
+from cogmem.consolidation.abstract import (
+    prepare_preference_dataset,
+    prepare_training_dataset,
+    save_as_jsonl,
+)
 from cogmem.consolidation.select import POLICIES
-from cogmem.consolidation.sft_train import train_sft_dora
-from cogmem.consolidation.triage import split_holdout, triage_episodes
+from cogmem.consolidation.train_generator import train_generator_full
+from cogmem.consolidation.train_verifier import train_verifier
 from cogmem.consolidation.verify import (
     aggregate_seed_results,
     run_verification_single_seed,
@@ -30,208 +36,210 @@ from cogmem.utils.logging import save_results
 
 
 # -------------------------------------------------------------------------
-# Sleep phase — the core CogMem consolidation pipeline
+# Q-STaR cycle — the core CogMem pipeline
 # -------------------------------------------------------------------------
 
-def run_sleep_phase(
+def run_qstar_cycle(
     memory_bank_path: str,
-    config: ConsolidationConfig,
-    benchmark: str = "bigcodebench",
+    config: CogMemConfig,
+    cycle: int = 0,
     run_task_fn=None,
 ) -> dict:
-    """Run the consolidation pipeline: triage -> SFT DoRA -> verify.
+    """Run one Q-STaR consolidation cycle.
 
     Steps:
-        1. Load memory bank
-        2. Triage episodes by Q-value zone
-        3. Split holdout from high-Q zone
-        4. SFT DoRA on high-Q episodes
-        5. Verify adapter on holdout
-        6. Tag consolidated episodes
+        1. Load memory bank, select high-Q episodes
+        2. Build preference pairs from Q-value differences
+        3. Train generator DoRA (SFT then DPO)
+        4. Train verifier DoRA (DPO)
+        5. Evaluate
 
     Args:
         memory_bank_path: Path to memory bank JSON.
-        config: ConsolidationConfig.
-        benchmark: "bigcodebench" or "alfworld".
-        run_task_fn: Optional callable(task_description) -> {"success": bool}
-            for holdout verification. If None, verification is skipped.
+        config: CogMemConfig.
+        cycle: Current cycle number (0-indexed).
+        run_task_fn: Optional callable for evaluation.
 
     Returns:
-        Dict with triage stats, adapter path, verification results.
+        Dict with adapter paths, training stats, evaluation results.
     """
     print("=" * 60)
-    print(f"COGMEM SLEEP PHASE — {benchmark.upper()}")
+    print(f"Q-STaR CYCLE {cycle}")
+    print(f"Model: {config.active_model_hf}")
     print(f"Started: {datetime.now().isoformat()}")
     print("=" * 60)
 
-    # 1. Load
+    # 1. Load and split holdout BEFORE training
     bank = MemoryBank.load(memory_bank_path)
-    episodes = list(bank)
-    print(f"\n1. Loaded memory bank: {len(episodes)} episodes")
+    all_episodes = list(bank)
+    print(f"\n1. Memory bank: {len(all_episodes)} episodes")
 
-    # 2. Triage
-    print("\n2. Q-value triage:")
-    zones = triage_episodes(episodes, config)
+    holdout_n = min(config.min_holdout, len(all_episodes))
+    holdout_episodes = all_episodes[:holdout_n]
+    holdout_task_ids = {ep.get("task_id") for ep in holdout_episodes if ep.get("task_id")}
+    available_episodes = [ep for ep in all_episodes if ep.get("task_id") not in holdout_task_ids]
+    print(f"  Holdout: {len(holdout_episodes)} ({len(holdout_task_ids)} tasks), "
+          f"Available: {len(available_episodes)}")
 
-    # 3. Split holdout from high-Q
-    print("\n3. Holdout split:")
-    high_train, holdout = split_holdout(
-        zones["high"], fraction=config.holdout_fraction, seed=config.seed
-    )
-    print(f"  High-Q for SFT: {len(high_train)}")
-    print(f"  Holdout for verification: {len(holdout)}")
+    select_fn = POLICIES["q_top_k"]
+    selected = select_fn(available_episodes, config)
+    successes = [ep for ep in available_episodes if ep.get("success")]
+    print(f"  Successes: {len(successes)}")
+    print(f"  High-Q selected: {len(selected)} (Q >= {config.q_threshold})")
 
-    # 4. SFT DoRA on high-Q
+    # 2. Build preference pairs (from available episodes only)
+    print("\n2. Building preference pairs from Q-values...")
+    pref_pairs = prepare_preference_dataset(available_episodes, config)
+
+    pref_dataset = None
+    if pref_pairs:
+        pref_dataset = Dataset.from_list(pref_pairs)
+
+    # 3. Train generator (SFT then DPO)
     print(f"\n{'=' * 60}")
-    print("SFT DoRA on high-Q episodes")
+    print("STEP 3: Train Generator DoRA (SFT -> DPO)")
     print("=" * 60)
 
-    sft_path, sft_loss = train_sft_dora(
-        high_train, config, benchmark=benchmark, output_name="sft_dora"
+    if not selected:
+        print("  No high-Q episodes available. Skipping training.")
+        return {
+            "cycle": cycle,
+            "timestamp": datetime.now().isoformat(),
+            "model": config.active_model_hf,
+            "total_episodes": len(all_episodes),
+            "high_q_episodes": 0,
+            "preference_pairs": len(pref_pairs),
+            "generator_path": None,
+            "verifier_path": None,
+            "verification": {},
+            "status": "skipped_no_data",
+        }
+
+    generator_path = train_generator_full(
+        selected, pref_dataset, config, cycle=cycle,
     )
 
-    # 5. Verify
+    # 4. Train verifier (DPO)
     print(f"\n{'=' * 60}")
-    print("VERIFICATION")
+    print("STEP 4: Train Verifier DoRA (DPO)")
+    print("=" * 60)
+
+    verifier_path = None
+    if pref_dataset is not None and len(pref_dataset) >= config.min_dpo_pairs:
+        verifier_path = train_verifier(pref_dataset, config, cycle=cycle)
+    else:
+        n = len(pref_dataset) if pref_dataset else 0
+        print(f"  Skipping verifier: {n} pairs (need >= {config.min_dpo_pairs})")
+
+    # 5. Evaluate
+    print(f"\n{'=' * 60}")
+    print("STEP 5: Evaluate")
     print("=" * 60)
 
     verification = {}
-    if run_task_fn is not None and holdout:
+    if run_task_fn is not None:
         seed_results = []
         for seed in config.eval_seeds:
-            r = run_verification_single_seed(holdout, run_task_fn, seed)
+            r = run_verification_single_seed(
+                holdout_episodes, run_task_fn, seed
+            )
             seed_results.append(r)
         verification = aggregate_seed_results(seed_results)
-        print(f"  SFT adapter: {verification['mean']:.1%} "
-              f"(+/- {verification['std']:.1%})")
-    else:
-        print("  Skipped (no run_task_fn or no holdout)")
-
-    # 6. Tag consolidated episodes (exclude holdout)
-    holdout_ids = {ep["episode_id"] for ep in holdout}
-    consolidated_ids = {ep["episode_id"] for ep in zones["high"]} - holdout_ids
-    tag_consolidated(episodes, consolidated_ids, domain=benchmark)
-    bank.save(memory_bank_path)
-    print(f"\n6. Tagged {len(consolidated_ids)} high-Q episodes as consolidated")
+        print(f"  Pass rate: {verification['mean']:.1%}")
 
     # Save results
     results = {
-        "benchmark": benchmark,
+        "cycle": cycle,
         "timestamp": datetime.now().isoformat(),
-        "triage": {
-            "high": len(zones["high"]),
-            "middle": len(zones["middle"]),
-            "low": len(zones["low"]),
-        },
-        "sft": {
-            "path": sft_path,
-            "training_episodes": len(high_train),
-            "final_loss": sft_loss,
-        },
+        "model": config.active_model_hf,
+        "total_episodes": len(all_episodes),
+        "high_q_episodes": len(selected),
+        "preference_pairs": len(pref_pairs),
+        "generator_path": generator_path,
+        "verifier_path": verifier_path,
         "verification": verification,
     }
 
     results_dir = Path(config.experiments_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = str(results_dir / f"sleep_phase_{benchmark}.json")
-    with open(results_path, "w") as f:
+    with open(str(results_dir / f"cycle_{cycle}_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
     print(f"\n{'=' * 60}")
-    print("SLEEP PHASE COMPLETE")
-    print(f"  SFT adapter: {sft_path}")
+    print(f"CYCLE {cycle} COMPLETE")
+    print(f"  Generator: {generator_path}")
+    print(f"  Verifier:  {verifier_path}")
     if verification:
-        print(f"  Holdout rate: {verification['mean']:.1%}")
+        print(f"  Pass rate: {verification['mean']:.1%}")
     print("=" * 60)
 
     return results
 
 
-def run_iterative_consolidation(
+def run_iterative_qstar(
     memory_bank_path: str,
-    config: ConsolidationConfig,
-    benchmark: str = "bigcodebench",
+    config: CogMemConfig,
     collect_fn=None,
     run_task_fn=None,
-    max_cycles: int = 8,
 ) -> list[dict]:
-    """Run multiple sleep cycles.
+    """Run multiple Q-STaR cycles until plateau.
 
-    Each cycle:
-        1. Run sleep phase (SFT DoRA)
-        2. Optionally collect new episodes with improved model
-        3. Track learning curve
-        4. Stop on plateau
+    Args:
+        memory_bank_path: Path to memory bank JSON.
+        config: CogMemConfig.
+        collect_fn: Optional callable(generator_path, verifier_path) -> None.
+            Collects new episodes using improved model.
+        run_task_fn: Optional callable for evaluation.
+
+    Returns:
+        Learning curve: list of per-cycle results.
     """
     learning_curve = []
 
-    for cycle in range(1, max_cycles + 1):
-        print(f"\n{'#' * 60}")
-        print(f"# CYCLE {cycle} / {max_cycles}")
-        print(f"{'#' * 60}")
-
-        results = run_sleep_phase(
-            memory_bank_path, config, benchmark, run_task_fn
+    for cycle in range(config.max_cycles):
+        results = run_qstar_cycle(
+            memory_bank_path, config, cycle=cycle, run_task_fn=run_task_fn
         )
+        learning_curve.append(results)
 
-        point = {
-            "cycle": cycle,
-            "triage": results["triage"],
-            "sft_loss": results["sft"].get("final_loss"),
-            "sft_path": results["sft"]["path"],
-            "verification": results.get("verification", {}),
-        }
-        learning_curve.append(point)
+        # Collect new episodes with improved model
+        if collect_fn is not None and results.get("generator_path"):
+            print(f"\n  Collecting new episodes with cycle-{cycle} model...")
+            collect_fn(results["generator_path"], results.get("verifier_path"))
 
-        # Optionally collect new episodes with improved model
-        if collect_fn is not None:
-            print("\n  Collecting new episodes with improved model...")
-            new_episodes = collect_fn(results["sft"]["path"])
-            if new_episodes:
-                bank = MemoryBank.load(memory_bank_path)
-                current = list(bank)
-                current.extend(new_episodes)
-                bank_new = MemoryBank(current)
-                bank_new.save(memory_bank_path)
-                print(f"  Added {len(new_episodes)} new episodes "
-                      f"(total: {len(current)})")
-
-        # Check for plateau (only when verification was actually run)
+        # Check plateau
         if len(learning_curve) >= 3:
-            recent_verif = [
-                p.get("verification", {}).get("mean")
-                for p in learning_curve[-3:]
+            recent = [
+                r.get("verification", {}).get("mean")
+                for r in learning_curve[-3:]
             ]
-            valid = [v for v in recent_verif if v is not None and v > 0]
-            if len(valid) >= 3:
-                gain = valid[-1] - valid[0]
-                if gain < 0.01:
-                    print("\n  Plateau detected (gain < 1% over 3 cycles).")
-                    break
+            valid = [v for v in recent if v is not None]
+            if len(valid) >= 3 and valid[-1] - valid[0] < config.plateau_threshold:
+                print(f"\n  Plateau detected (< {config.plateau_threshold:.0%} "
+                      f"improvement over 3 cycles).")
+                break
 
     # Save learning curve
     results_dir = Path(config.experiments_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    curve_path = str(results_dir / f"learning_curve_{benchmark}.json")
-    with open(curve_path, "w") as f:
+    with open(str(results_dir / "iterative_qstar_results.json"), "w") as f:
         json.dump(learning_curve, f, indent=2)
 
     # Print summary
     print(f"\n{'=' * 60}")
-    print("ITERATIVE CONSOLIDATION COMPLETE")
+    print("Q-STaR ITERATIVE RESULTS")
     print("=" * 60)
-    print(f"{'Cycle':<8} {'SFT Loss':<12} {'High-Q':<10}")
-    print("-" * 30)
-    for p in learning_curve:
-        loss = p.get("sft_loss")
-        loss_str = f"{loss:.3f}" if loss else "N/A"
-        print(f"{p['cycle']:<8} {loss_str:<12} {p['triage']['high']:<10}")
+    print(f"{'Cycle':<8} {'Episodes':<12} {'Pairs':<10} {'Generator':<15}")
+    print("-" * 45)
+    for r in learning_curve:
+        print(f"{r['cycle']:<8} {r['total_episodes']:<12} "
+              f"{r['preference_pairs']:<10} {r['generator_path']}")
 
     return learning_curve
 
 
 # -------------------------------------------------------------------------
-# Legacy pipelines (Experiment 1 & 2) — preserved for backward compat
+# Legacy pipelines (Experiment 1 & 2)
 # -------------------------------------------------------------------------
 
 def _load_replay_buffer(path: str) -> list[dict]:
@@ -325,37 +333,4 @@ def run_experiment_1(config: CogMemConfig, run_task_fn=None) -> dict:
     print(f"\nBest policy: {best_policy(policy_results)}")
 
     save_comparison(all_results, f"{config.logs_dir}/experiment_1_results.json")
-    return all_results
-
-
-def run_experiment_2(
-    config: CogMemConfig, exp1_results: dict, run_task_fns: dict
-) -> dict:
-    """Legacy: full system ablation."""
-    from cogmem.evaluation.compare import (
-        format_comparison_table,
-        save_comparison,
-    )
-
-    bank = MemoryBank.load(config.memory_bank_path)
-    holdout_n = 30 if len(bank.successful()) > 200 else config.verification_holdout
-    holdout, _ = bank.stratified_holdout(n=holdout_n, seed=config.seed)
-
-    all_results = {}
-    for variant_name, run_fn in run_task_fns.items():
-        print(f"\nEvaluating variant: {variant_name}")
-        seed_results = []
-        for seed in config.eval_seeds:
-            r = run_verification_single_seed(holdout, run_fn, seed)
-            seed_results.append(r)
-        all_results[variant_name] = aggregate_seed_results(seed_results)
-
-    print(
-        "\n"
-        + format_comparison_table(
-            {k: {"verification": v, "episodes_selected": "-"} for k, v in all_results.items()}
-        )
-    )
-
-    save_comparison(all_results, f"{config.logs_dir}/experiment_2_results.json")
     return all_results

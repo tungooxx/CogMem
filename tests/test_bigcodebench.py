@@ -208,19 +208,32 @@ class TestRunner:
             "complete_prompt": "def foo():",
             "entry_point": "foo",
         }
-        ep = _make_episode(task, response="Thought: ...\nCode: ...", code="return 1", passed=True, error=None)
+        trajectory = [
+            {"attempt": 1, "code": "return 1", "response": "Thought: ...\nCode: ...",
+             "test_result": "PASS", "error": None},
+        ]
+        ep = _make_episode(task, trajectory=trajectory, success=True,
+                           final_code="return 1")
         assert ep["task_id"] == "BigCodeBench/42"
         assert ep["success"] is True
         assert ep["q_value"] == 1.0
         assert "bigcode_" in ep["episode_id"]
+        assert ep["trajectory"] == trajectory
+        assert ep["final_code"] == "return 1"
 
     def test_make_episode_failure(self):
         from cogmem.benchmarks.bigcodebench.runner import _make_episode
 
         task = {"task_id": "BigCodeBench/0", "instruct_prompt": "x", "entry_point": "x"}
-        ep = _make_episode(task, response="", code="", passed=False, error="SyntaxError")
+        trajectory = [
+            {"attempt": 1, "code": "", "response": "",
+             "test_result": "FAIL", "error": "SyntaxError"},
+        ]
+        ep = _make_episode(task, trajectory=trajectory, success=False,
+                           final_code=None)
         assert ep["success"] is False
         assert ep["q_value"] == -1.0
+        assert ep["num_attempts"] == 1
 
     def test_load_episodes(self):
         from cogmem.benchmarks.bigcodebench.runner import load_episodes
