@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import openai
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
@@ -66,12 +67,23 @@ class SequentialMemoryBank:
 
     def _load(self):
         if Path(self.path).exists():
-            with open(self.path) as f:
-                self.episodes = json.load(f)
-            self.embeddings = [
-                np.array(ep["intent_embedding"])
-                for ep in self.episodes
-            ]
+            try:
+                with open(self.path) as f:
+                    raw = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Warning: corrupt memory bank at {self.path}, starting fresh")
+                return
+            valid_episodes = []
+            valid_embeddings = []
+            for ep in raw:
+                try:
+                    emb = np.array(ep["intent_embedding"])
+                    valid_episodes.append(ep)
+                    valid_embeddings.append(emb)
+                except (KeyError, TypeError, ValueError):
+                    print(f"Warning: skipping episode {ep.get('episode_id', '?')} (bad embedding)")
+            self.episodes = valid_episodes
+            self.embeddings = valid_embeddings
             print(f"Loaded {len(self.episodes)} episodes from {self.path}")
 
     def save(self):
@@ -268,7 +280,7 @@ def collect_sequential(tasks_path, resume=False):
                 )
                 response = resp.choices[0].message.content
                 code = extract_code(response)
-            except Exception as e:
+            except (openai.OpenAIError, ConnectionError, TimeoutError) as e:
                 trajectory.append({
                     "attempt": attempt, "code": "", "response": "",
                     "test_result": "ERROR", "error": str(e),
