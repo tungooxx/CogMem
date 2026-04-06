@@ -6,10 +6,7 @@ Two dataset types:
 """
 
 import json
-import random as _random
 from pathlib import Path
-
-import numpy as np
 
 
 def episode_to_training_pair(episode: dict, include_failures: bool = True) -> dict | None:
@@ -120,11 +117,13 @@ def prepare_preference_dataset(
     # Real experience: model attempted same task in different cycles
     tasks_by_id: dict[str, list[dict]] = {}
     for ep in all_episodes:
-        task_id = ep.get("task_id", ep.get("episode_id", ""))
+        task_id = ep.get("task_id")
+        if not task_id:
+            continue
         tasks_by_id.setdefault(task_id, []).append(ep)
 
     cross_cycle_count = 0
-    for task_id, eps in tasks_by_id.items():
+    for _, eps in tasks_by_id.items():
         if len(eps) < 2:
             continue
 
@@ -142,7 +141,7 @@ def prepare_preference_dataset(
                       or worst.get("generated_code")
                       or worst.get("script"))
 
-        if best_code and worst_code and len(worst_code) > 20:
+        if best_code and worst_code and len(best_code) > 20 and len(worst_code) > 20:
             pairs.append({
                 "prompt": best.get("task_description", ""),
                 "chosen": best_code,

@@ -70,20 +70,25 @@ def run_qstar_cycle(
     print(f"Started: {datetime.now().isoformat()}")
     print("=" * 60)
 
-    # 1. Load and select
+    # 1. Load and split holdout BEFORE training
     bank = MemoryBank.load(memory_bank_path)
     all_episodes = list(bank)
     print(f"\n1. Memory bank: {len(all_episodes)} episodes")
 
+    holdout_n = min(config.min_holdout, len(all_episodes))
+    holdout_episodes = all_episodes[:holdout_n]
+    available_episodes = all_episodes[holdout_n:]
+    print(f"  Holdout: {holdout_n}, Available for training: {len(available_episodes)}")
+
     select_fn = POLICIES["q_top_k"]
-    selected = select_fn(all_episodes, config)
-    successes = [ep for ep in all_episodes if ep.get("success")]
+    selected = select_fn(available_episodes, config)
+    successes = [ep for ep in available_episodes if ep.get("success")]
     print(f"  Successes: {len(successes)}")
     print(f"  High-Q selected: {len(selected)} (Q >= {config.q_threshold})")
 
-    # 2. Build preference pairs
+    # 2. Build preference pairs (from available episodes only)
     print("\n2. Building preference pairs from Q-values...")
-    pref_pairs = prepare_preference_dataset(all_episodes, config)
+    pref_pairs = prepare_preference_dataset(available_episodes, config)
 
     pref_dataset = None
     if pref_pairs:
@@ -120,7 +125,7 @@ def run_qstar_cycle(
         seed_results = []
         for seed in config.eval_seeds:
             r = run_verification_single_seed(
-                all_episodes[:config.min_holdout], run_task_fn, seed
+                holdout_episodes, run_task_fn, seed
             )
             seed_results.append(r)
         verification = aggregate_seed_results(seed_results)

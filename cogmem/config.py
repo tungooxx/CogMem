@@ -129,10 +129,12 @@ class CogMemConfig:
         if model_type == "coder":
             self.active_model_ollama = self.coder_model_ollama
             self.active_model_hf = self.coder_model_hf
+            self.base_model = self.coder_model_hf
             self.use_curriculum = False
         elif model_type == "general":
             self.active_model_ollama = self.general_model_ollama
             self.active_model_hf = self.general_model_hf
+            self.base_model = self.general_model_hf
             self.use_curriculum = True
         else:
             raise ValueError(f"model_type must be 'coder' or 'general', got {model_type!r}")

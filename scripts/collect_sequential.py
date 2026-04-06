@@ -210,14 +210,18 @@ def collect_sequential(tasks_path, resume=False):
     bank = SequentialMemoryBank(MEMORY_BANK_PATH)
 
     # Resume support
-    completed = bank.completed_task_ids()
-    if completed:
-        print(f"Resuming: {len(completed)} tasks already done")
-
-    remaining = [t for t in tasks if t["task_id"] not in completed]
+    if resume:
+        completed = bank.completed_task_ids()
+        if completed:
+            print(f"Resuming: {len(completed)} tasks already done")
+        remaining = [t for t in tasks if t["task_id"] not in completed]
+        done = len(completed)
+        successes = sum(1 for ep in bank.episodes if ep["success"])
+    else:
+        remaining = tasks
+        done = 0
+        successes = 0
     total_tasks = len(tasks)
-    done = len(completed)
-    successes = sum(1 for ep in bank.episodes if ep["success"])
 
     start_time = time.time()
 
@@ -282,8 +286,11 @@ def collect_sequential(tasks_path, resume=False):
         }
         bank.add(episode)
 
-        # 7. Update Q-values of retrieved episodes
-        for ret_ep in retrieved:
+        # 7. Update Q-values of retrieved episodes that were actually shown
+        #    Only successful episodes are included in the prompt (see build_prompt_with_retrieval),
+        #    so only credit those — others weren't used and shouldn't get Q-updates.
+        shown_in_prompt = [ep for ep in retrieved if ep.get("success")]
+        for ret_ep in shown_in_prompt:
             idx = ret_ep["_index"]
             bank.update_q(idx, success)
             bank.episodes[idx].setdefault("retrieved_by", []).append(

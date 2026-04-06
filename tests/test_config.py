@@ -24,11 +24,13 @@ def test_set_active_model():
     cfg.set_active_model("general")
     assert cfg.active_model_hf == "Qwen/Qwen2.5-3B-Instruct"
     assert cfg.active_model_ollama == "qwen2.5:3b"
+    assert cfg.base_model == "Qwen/Qwen2.5-3B-Instruct"
     assert cfg.use_curriculum is True
 
     cfg.set_active_model("coder")
     assert cfg.active_model_hf == "Qwen/Qwen2.5-Coder-3B-Instruct"
     assert cfg.active_model_ollama == "qwen2.5-coder:3b"
+    assert cfg.base_model == "Qwen/Qwen2.5-Coder-3B-Instruct"
     assert cfg.use_curriculum is False
 
 

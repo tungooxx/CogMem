@@ -9,7 +9,6 @@ Episodes include:
 """
 
 import json
-import re
 import time
 from pathlib import Path
 
@@ -241,5 +240,5 @@ def load_episodes(path: str) -> list[dict]:
                 episodes.append(json.loads(line))
             except json.JSONDecodeError:
                 print(f"Warning: skipping malformed line in {path}")
-                break
+                continue
     return episodes

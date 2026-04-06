@@ -18,7 +18,7 @@ def load_verifier(base_model_name: str, adapter_path: str, device: str = "cuda:0
     base = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         quantization_config=bnb_config,
-        device_map={"": 0},
+        device_map={"": device},
         torch_dtype=torch.float16,
     )
     model = PeftModel.from_pretrained(base, adapter_path)
@@ -37,8 +37,15 @@ def score_candidate(
     """Score a candidate solution using log-probability.
 
     Higher log-prob = verifier thinks this is better code.
+    Uses the same chat-template format as DPO training.
     """
-    full_text = f"### Instruction:\n{prompt}\n\n### Response:\n{code}"
+    messages = [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": code},
+    ]
+    full_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False
+    )
     inputs = tokenizer(full_text, return_tensors="pt", truncation=True,
                        max_length=2048).to(model.device)
 
@@ -47,7 +54,10 @@ def score_candidate(
         logits = outputs.logits
 
     # Compute log-prob of response tokens only (skip prompt)
-    prompt_text = f"### Instruction:\n{prompt}\n\n### Response:\n"
+    prompt_messages = [{"role": "user", "content": prompt}]
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_messages, tokenize=False, add_generation_prompt=True
+    )
     prompt_len = len(tokenizer(prompt_text)["input_ids"])
 
     if prompt_len >= logits.shape[1]:
