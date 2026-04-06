@@ -216,11 +216,11 @@ def collect_sequential(tasks_path, resume=False):
         if completed:
             print(f"Resuming: {len(completed)} tasks already done")
         remaining = [t for t in tasks if t["task_id"] not in completed]
-        done = len(completed)
+        done = len(bank.episodes)  # use episode count for ID numbering
         successes = sum(1 for ep in bank.episodes if ep["success"])
     else:
         remaining = tasks
-        done = 0
+        done = len(bank.episodes)  # non-zero if bank has prior data
         successes = 0
     total_tasks = len(tasks)
 
@@ -233,13 +233,14 @@ def collect_sequential(tasks_path, resume=False):
         # 1. Embed
         task_embedding = embedder.encode(instruction).tolist()
 
-        # 2. Retrieve
-        retrieved = bank.retrieve(
+        # 2. Retrieve (exclude same task to avoid self-retrieval)
+        retrieved_raw = bank.retrieve(
             task_embedding,
             top_k_semantic=TOP_K_SEMANTIC,
             top_k_final=TOP_K_FINAL,
             min_similarity=MIN_SIMILARITY,
         )
+        retrieved = [ep for ep in retrieved_raw if ep.get("task_id") != task_id]
 
         # 3. Build prompt
         messages = build_prompt_with_retrieval(instruction, retrieved)

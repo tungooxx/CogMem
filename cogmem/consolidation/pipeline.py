@@ -76,8 +76,10 @@ def run_qstar_cycle(
 
     holdout_n = min(config.min_holdout, len(all_episodes))
     holdout_episodes = all_episodes[:holdout_n]
-    available_episodes = all_episodes[holdout_n:]
-    print(f"  Holdout: {holdout_n}, Available for training: {len(available_episodes)}")
+    holdout_task_ids = {ep.get("task_id") for ep in holdout_episodes if ep.get("task_id")}
+    available_episodes = [ep for ep in all_episodes if ep.get("task_id") not in holdout_task_ids]
+    print(f"  Holdout: {len(holdout_episodes)} ({len(holdout_task_ids)} tasks), "
+          f"Available: {len(available_episodes)}")
 
     select_fn = POLICIES["q_top_k"]
     selected = select_fn(available_episodes, config)
@@ -201,7 +203,7 @@ def run_iterative_qstar(
         learning_curve.append(results)
 
         # Collect new episodes with improved model
-        if collect_fn is not None:
+        if collect_fn is not None and results.get("generator_path"):
             print(f"\n  Collecting new episodes with cycle-{cycle} model...")
             collect_fn(results["generator_path"], results.get("verifier_path"))
 

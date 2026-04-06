@@ -100,8 +100,12 @@ def prepare_preference_dataset(
         if not chosen_code:
             continue
 
-        # First attempt is usually the failure
-        rejected_code = trajectory[0].get("code", "")
+        # Find the best failed attempt (most recent with real code)
+        rejected_code = ""
+        for step in reversed(trajectory):
+            if step.get("test_result") != "PASS" and step.get("code", "").strip():
+                rejected_code = step["code"]
+                break
 
         if (rejected_code
                 and len(rejected_code.strip()) > 20
