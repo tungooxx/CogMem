@@ -277,7 +277,13 @@ def train_generator_dpo(
 def _prepare_sft_dataset(
     episodes: list[dict], tokenizer, config,
 ) -> Dataset:
-    """Convert high-Q episodes to tokenized SFT data with Q-weighted duplication."""
+    """Convert high-Q episodes to tokenized SFT data.
+
+    CRITICAL: Uses the SAME prompt format as evaluation (format_messages)
+    so the model learns to respond to the exact same prompts it sees at test time.
+    """
+    from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
+
     pairs = []
     for ep in episodes:
         code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
@@ -285,13 +291,11 @@ def _prepare_sft_dataset(
             continue
 
         instruction = ep.get("task_description", "")
-        q = max(ep.get("q_value", 0.0), 0.01)
-        copies = max(1, round(q * 3))
 
-        for _ in range(copies):
-            pairs.append({
-                "messages": [
-                    {"role": "user", "content": instruction},
+        pairs.append({
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": instruction},
                     {"role": "assistant", "content": code},
                 ]
             })
