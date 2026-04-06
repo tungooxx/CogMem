@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean
 
-import numpy as np
 from datasets import Dataset
 
 from cogmem.config import CogMemConfig

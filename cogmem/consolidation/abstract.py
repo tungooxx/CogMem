@@ -104,8 +104,8 @@ def prepare_preference_dataset(
         rejected_code = trajectory[0].get("code", "")
 
         if (rejected_code
-                and len(rejected_code) > 20
-                and chosen_code != rejected_code):
+                and len(rejected_code.strip()) > 20
+                and chosen_code.strip() != rejected_code.strip()):
             pairs.append({
                 "prompt": ep.get("task_description", ""),
                 "chosen": chosen_code,

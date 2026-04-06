@@ -210,6 +210,7 @@ def collect_sequential(tasks_path, resume=False):
     bank = SequentialMemoryBank(MEMORY_BANK_PATH)
 
     # Resume support
+    completed = set()
     if resume:
         completed = bank.completed_task_ids()
         if completed:
@@ -243,34 +244,72 @@ def collect_sequential(tasks_path, resume=False):
         # 3. Build prompt
         messages = build_prompt_with_retrieval(instruction, retrieved)
 
-        # 4. Generate
-        try:
-            resp = client.chat.completions.create(
-                model=MODEL_NAME, messages=messages,
-                max_tokens=2048, temperature=0,
-            )
-            response = resp.choices[0].message.content
-            code = extract_code(response)
-        except Exception as e:
-            response = ""
-            code = ""
+        # 4. Generate with retry (builds trajectory for DPO pairs)
+        MAX_ATTEMPTS = 3
+        trajectory = []
+        success = False
+        final_code = None
+        last_response = ""
+        last_code = ""
+        error = None
 
-        # 5. Test
-        if code:
-            result = evaluate_solution(task, code, timeout=30, mode="subprocess")
-            success = result["passed"]
-            error = result.get("error")
-        else:
-            success = False
-            error = "Empty code"
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    prev_err = trajectory[-1].get("error", "")[:500]
+                    messages = build_prompt_with_retrieval(instruction, retrieved)
+                    messages.append({"role": "user",
+                                     "content": f"Previous attempt failed:\n{prev_err}\nPlease fix."})
 
-        # 6. Store episode
+                resp = client.chat.completions.create(
+                    model=MODEL_NAME, messages=messages,
+                    max_tokens=2048, temperature=0,
+                )
+                response = resp.choices[0].message.content
+                code = extract_code(response)
+            except Exception as e:
+                trajectory.append({
+                    "attempt": attempt, "code": "", "response": "",
+                    "test_result": "ERROR", "error": str(e),
+                })
+                continue
+
+            if code:
+                result = evaluate_solution(task, code, timeout=30, mode="subprocess")
+                passed = result["passed"]
+                err = result.get("error")
+            else:
+                passed = False
+                err = "Empty code"
+
+            trajectory.append({
+                "attempt": attempt, "code": code, "response": response,
+                "test_result": "PASS" if passed else "FAIL",
+                "error": err if not passed else None,
+            })
+
+            last_response = response
+            last_code = code
+
+            if passed:
+                success = True
+                final_code = code
+                error = None
+                break
+
+        if not success and trajectory:
+            error = trajectory[-1].get("error")
+
+        # 5. Store episode
         episode = {
             "episode_id": f"bcb_seq_{done:04d}",
             "task_id": task_id,
             "task_description": instruction,
-            "generated_code": code,
-            "script": response,
+            "generated_code": last_code,
+            "final_code": final_code,
+            "script": last_response,
+            "trajectory": trajectory,
+            "num_attempts": len(trajectory),
             "success": success,
             "q_value": Q_INITIAL,
             "q_visits": 0,
