@@ -111,7 +111,7 @@ class CogMemConfig:
     replay_buffer_path: str = ""
     lora_provider: str = "local"
     together_api_key: str = ""
-    base_model: str = "Qwen/Qwen2.5-Coder-3B-Instruct"
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct"  # synced with active_model_hf
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_epochs: int = 3

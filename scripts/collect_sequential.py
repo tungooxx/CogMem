@@ -268,7 +268,7 @@ def collect_sequential(tasks_path, resume=False):
         episode = {
             "episode_id": f"bcb_seq_{done:04d}",
             "task_id": task_id,
-            "task_description": instruction[:500],
+            "task_description": instruction,
             "generated_code": code,
             "script": response,
             "success": success,
@@ -276,7 +276,7 @@ def collect_sequential(tasks_path, resume=False):
             "q_visits": 0,
             "q_successes": 0,
             "q_failures": 0,
-            "retrieved_from": [ep["episode_id"] for ep in retrieved],
+            "retrieved_from": [ep["episode_id"] for ep in retrieved if ep.get("success")],
             "retrieved_by": [],
             "intent_embedding": task_embedding,
             "error": error,

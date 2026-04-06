@@ -141,7 +141,9 @@ def prepare_preference_dataset(
                       or worst.get("generated_code")
                       or worst.get("script"))
 
-        if best_code and worst_code and len(best_code) > 20 and len(worst_code) > 20:
+        if (best_code and worst_code
+                and len(best_code) > 20 and len(worst_code) > 20
+                and best_code.strip() != worst_code.strip()):
             pairs.append({
                 "prompt": best.get("task_description", ""),
                 "chosen": best_code,

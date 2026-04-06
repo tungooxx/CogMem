@@ -99,6 +99,21 @@ def run_qstar_cycle(
     print("STEP 3: Train Generator DoRA (SFT -> DPO)")
     print("=" * 60)
 
+    if not selected:
+        print("  No high-Q episodes available. Skipping training.")
+        return {
+            "cycle": cycle,
+            "timestamp": datetime.now().isoformat(),
+            "model": config.active_model_hf,
+            "total_episodes": len(all_episodes),
+            "high_q_episodes": 0,
+            "preference_pairs": len(pref_pairs),
+            "generator_path": None,
+            "verifier_path": None,
+            "verification": {},
+            "status": "skipped_no_data",
+        }
+
     generator_path = train_generator_full(
         selected, pref_dataset, config, cycle=cycle,
     )
@@ -197,7 +212,7 @@ def run_iterative_qstar(
                 r.get("verification", {}).get("mean")
                 for r in learning_curve[-3:]
             ]
-            valid = [v for v in recent if v is not None and v > 0]
+            valid = [v for v in recent if v is not None]
             if len(valid) >= 3 and valid[-1] - valid[0] < config.plateau_threshold:
                 print(f"\n  Plateau detected (< {config.plateau_threshold:.0%} "
                       f"improvement over 3 cycles).")
