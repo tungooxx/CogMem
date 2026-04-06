@@ -4,7 +4,6 @@ Phase 1 collection engine: the model attempts tasks (with retry),
 we record success/failure + trajectory as episodes in the memory bank.
 
 Episodes include:
-- domain: categorized by task libraries (pandas, numpy, etc.)
 - trajectory: list of attempts with code + test result
 - final_code: the successful code (if any)
 """
@@ -16,47 +15,6 @@ from pathlib import Path
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import extract_code, format_messages
-
-
-# -------------------------------------------------------------------------
-# Domain classification
-# -------------------------------------------------------------------------
-
-_DOMAIN_KEYWORDS = {
-    "pandas": ["pandas", "pd.", "DataFrame", "read_csv", "groupby"],
-    "numpy": ["numpy", "np.", "ndarray", "array("],
-    "file_io": ["open(", "read(", "write(", "os.path", "pathlib", "shutil"],
-    "web": ["requests", "urllib", "http", "url", "socket", "flask"],
-    "math": ["math.", "statistics", "scipy", "sympy"],
-    "string": ["re.", "regex", "split(", "join(", "replace(", "strip("],
-    "datetime": ["datetime", "timedelta", "strftime", "strptime"],
-    "ml": ["sklearn", "torch", "tensorflow", "model.fit", "train_test_split"],
-    "plot": ["matplotlib", "plt.", "seaborn", "plot("],
-    "crypto": ["hashlib", "hmac", "base64", "encrypt", "decrypt"],
-    "json_xml": ["json.", "xml.", "yaml.", "toml."],
-    "subprocess": ["subprocess", "os.system", "Popen"],
-}
-
-
-def classify_domain(task: dict) -> str:
-    """Classify a BigCodeBench task into a domain based on its content."""
-    text = (
-        task.get("instruct_prompt", "")
-        + " "
-        + task.get("complete_prompt", "")
-        + " "
-        + task.get("canonical_solution", "")
-    ).lower()
-
-    scores: dict[str, int] = {}
-    for domain, keywords in _DOMAIN_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw.lower() in text)
-        if score > 0:
-            scores[domain] = score
-
-    if scores:
-        return max(scores, key=scores.get)
-    return "general"
 
 
 # -------------------------------------------------------------------------
@@ -79,7 +37,6 @@ def run_single_task(
 
     Returns an episode dict with trajectory and domain fields.
     """
-    domain = classify_domain(task)
     trajectory = []
 
     for attempt in range(1, max_attempts + 1):
@@ -139,7 +96,6 @@ def run_single_task(
         trajectory=trajectory,
         success=success,
         final_code=final_code,
-        domain=domain,
     )
 
 
@@ -148,7 +104,6 @@ def _make_episode(
     trajectory: list[dict],
     success: bool,
     final_code: str | None,
-    domain: str = "general",
 ) -> dict:
     """Build a CogMem episode from a BigCodeBench task attempt."""
     # Use last response as "script" for backward compat
@@ -172,7 +127,6 @@ def _make_episode(
         "q_value": 1.0 if success else -1.0,
         "error": trajectory[-1].get("error") if trajectory else None,
         "entry_point": task.get("entry_point", ""),
-        "domain": domain,
         "trajectory": trajectory,
         "num_attempts": len(trajectory),
         "timestamp": time.time(),
@@ -251,9 +205,8 @@ def run_batch(
 
         status = "PASS" if episode["success"] else "FAIL"
         attempts = episode["num_attempts"]
-        domain = episode["domain"]
         print(f"[{done}/{total}] {task['task_id']} — {status} "
-              f"(attempts={attempts}, domain={domain})")
+              f"(attempts={attempts})")
 
         if progress_callback:
             progress_callback(done, total, episode)

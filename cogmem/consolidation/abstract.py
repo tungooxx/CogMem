@@ -115,43 +115,28 @@ def prepare_preference_dataset(
             })
             within_count += 1
 
-    # ═══ Source 2: Same-domain pairs ═══
-    # Good code vs bad code from the same domain (e.g., both do pandas work)
-    successes_by_domain: dict[str, list[dict]] = {}
-    failures_by_domain: dict[str, list[tuple[dict, str]]] = {}
-
+    # ═══ Source 2: Success vs failure pairs (random sampling) ═══
+    successes = []
+    failures = []
     for ep in all_episodes:
-        domain = ep.get("domain", "general")
         code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
         if not code or len(code.strip()) <= 20:
             continue
-
         if ep.get("success"):
-            successes_by_domain.setdefault(domain, []).append(ep)
+            successes.append((ep, code))
         else:
-            failures_by_domain.setdefault(domain, []).append((ep, code))
+            failures.append((ep, code))
 
-    domain_count = 0
-    for domain, winners in successes_by_domain.items():
-        losers = failures_by_domain.get(domain, [])
-        if not losers:
-            continue
-
-        for winner in winners:
-            winner_code = (winner.get("final_code")
-                           or winner.get("generated_code")
-                           or winner.get("script"))
-            if not winner_code:
-                continue
-
-            sampled = losers if len(losers) <= 3 else rng.sample(losers, 3)
-            for loser_ep, loser_code in sampled:
-                pairs.append({
-                    "prompt": winner.get("task_description", ""),
-                    "chosen": winner_code,
-                    "rejected": loser_code,
-                })
-                domain_count += 1
+    direct_count = 0
+    for winner_ep, winner_code in successes:
+        sampled = failures if len(failures) <= 3 else rng.sample(failures, 3)
+        for loser_ep, loser_code in sampled:
+            pairs.append({
+                "prompt": winner_ep.get("task_description", ""),
+                "chosen": winner_code,
+                "rejected": loser_code,
+            })
+            direct_count += 1
 
     # ═══ Source 3: Same-task across cycles (cycle 1+ only) ═══
     tasks_by_id: dict[str, list[dict]] = {}
@@ -188,7 +173,7 @@ def prepare_preference_dataset(
 
     print(f"  DPO pairs total: {len(pairs)}")
     print(f"    Within-episode:  {within_count}")
-    print(f"    Same-domain:     {domain_count}")
+    print(f"    Success-vs-fail: {direct_count}")
     print(f"    Cross-cycle:     {cross_cycle_count}")
 
     return pairs

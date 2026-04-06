@@ -213,12 +213,11 @@ class TestRunner:
              "test_result": "PASS", "error": None},
         ]
         ep = _make_episode(task, trajectory=trajectory, success=True,
-                           final_code="return 1", domain="general")
+                           final_code="return 1")
         assert ep["task_id"] == "BigCodeBench/42"
         assert ep["success"] is True
         assert ep["q_value"] == 1.0
         assert "bigcode_" in ep["episode_id"]
-        assert ep["domain"] == "general"
         assert ep["trajectory"] == trajectory
         assert ep["final_code"] == "return 1"
 
@@ -231,7 +230,7 @@ class TestRunner:
              "test_result": "FAIL", "error": "SyntaxError"},
         ]
         ep = _make_episode(task, trajectory=trajectory, success=False,
-                           final_code=None, domain="general")
+                           final_code=None)
         assert ep["success"] is False
         assert ep["q_value"] == -1.0
         assert ep["num_attempts"] == 1
