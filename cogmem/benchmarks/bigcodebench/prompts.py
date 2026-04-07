@@ -46,9 +46,10 @@ def format_for_training(task_description: str, code: str) -> str:
     For episodes where the model output raw code (no Thought),
     this wraps it in the expected format so training data is consistent.
     """
+    desc = task_description[:150].rsplit(" ", 1)[0].rstrip(".,;:")
     return (
         f"Thought: I need to implement a function that "
-        f"{task_description[:100]}.\n"
+        f"{desc}.\n"
         f"Code:\n```python\n{code}\n```"
     )
 
