@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -48,7 +49,10 @@ TOP_K_FINAL = 3
 MIN_SIMILARITY = 0.3
 
 # Paths
-MEMORY_BANK_PATH = "/notebooks/results/bigcodebench/memory_bank_sequential.json"
+MEMORY_BANK_PATH = os.environ.get(
+    "COGMEM_BANK_PATH",
+    "results/bigcodebench/memory_bank_sequential.json",
+)
 TASKS_PATH = None  # set from args or auto-detect
 
 
@@ -214,8 +218,6 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
         shuffle: Randomize task order (use for cycle 1+ so late tasks
                  get retrieval exposure too).
     """
-    import random as _rng
-
     # Load tasks
     tasks = []
     with open(tasks_path) as f:
@@ -225,8 +227,9 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
     print(f"Loaded {len(tasks)} tasks from {tasks_path}")
 
     if shuffle:
-        _rng.seed(42)
-        _rng.shuffle(tasks)
+        import random
+        local_rng = random.Random(42)
+        local_rng.shuffle(tasks)
         print("Shuffled task order (for cycle 1+ retrieval exposure)")
 
     # Initialize
@@ -469,6 +472,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sequential BigCodeBench collection")
     parser.add_argument("--tasks", default=None, help="Path to tasks JSONL")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
+    parser.add_argument("--shuffle", action="store_true", help="Randomize task order (cycle 1+)")
     parser.add_argument("--analyze-only", action="store_true", help="Only analyze existing data")
     parser.add_argument("--model", default=MODEL_NAME, help="Ollama model name")
     parser.add_argument("--bank", default=MEMORY_BANK_PATH, help="Memory bank path")
@@ -498,6 +502,6 @@ if __name__ == "__main__":
         print(f"Memory bank: {MEMORY_BANK_PATH}")
         print()
 
-        bank = collect_sequential(tasks_path, resume=args.resume)
+        bank = collect_sequential(tasks_path, resume=args.resume, shuffle=args.shuffle)
         print("\nRunning Q-value analysis...")
         analyze_q_values(MEMORY_BANK_PATH)
