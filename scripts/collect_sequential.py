@@ -48,7 +48,7 @@ TOP_K_FINAL = 3
 MIN_SIMILARITY = 0.3
 
 # Paths
-MEMORY_BANK_PATH = "results/bigcodebench/memory_bank_sequential.json"
+MEMORY_BANK_PATH = "/notebooks/results/bigcodebench/memory_bank_sequential.json"
 TASKS_PATH = None  # set from args or auto-detect
 
 
@@ -205,8 +205,16 @@ def build_prompt_with_retrieval(task_description, retrieved_episodes):
 # MAIN COLLECTION
 # ════════════════════════════════════════════
 
-def collect_sequential(tasks_path, resume=False):
-    """Process 1140 tasks sequentially with retrieval + Q-value updates."""
+def collect_sequential(tasks_path, resume=False, shuffle=False):
+    """Process tasks sequentially with retrieval + Q-value updates.
+
+    Args:
+        tasks_path: Path to tasks JSONL.
+        resume: Resume from existing bank.
+        shuffle: Randomize task order (use for cycle 1+ so late tasks
+                 get retrieval exposure too).
+    """
+    import random as _rng
 
     # Load tasks
     tasks = []
@@ -215,6 +223,11 @@ def collect_sequential(tasks_path, resume=False):
             if line.strip():
                 tasks.append(json.loads(line))
     print(f"Loaded {len(tasks)} tasks from {tasks_path}")
+
+    if shuffle:
+        _rng.seed(42)
+        _rng.shuffle(tasks)
+        print("Shuffled task order (for cycle 1+ retrieval exposure)")
 
     # Initialize
     embedder = SentenceTransformer(EMBEDDING_MODEL)
