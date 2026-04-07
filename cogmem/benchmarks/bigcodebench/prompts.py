@@ -1,6 +1,20 @@
 """System prompts and formatting for BigCodeBench tasks."""
 
-SYSTEM_PROMPT = """You are an expert Python programmer. Write a complete function that solves the following task. Include all necessary imports. Return ONLY the Python code, no explanations."""
+SYSTEM_PROMPT = """You are an expert Python programmer. You will be given a programming task with a function signature and docstring. Write the complete implementation.
+
+Rules:
+1. Implement ONLY the function body — do not redefine the signature or imports already provided.
+2. Think step-by-step before writing code.
+3. Use only standard library and the packages mentioned in the docstring.
+4. Your code must be correct and handle edge cases.
+
+Your response MUST follow this exact format:
+
+Thought: <your reasoning about how to solve this>
+Code:
+```python
+<your implementation>
+```"""
 
 SYSTEM_PROMPT_RAW = """You are an expert Python programmer. Given a task description, write a complete Python function implementation. Think step-by-step, then provide your code."""
 
@@ -24,6 +38,19 @@ def format_messages(task: dict, use_instruct: bool = True) -> list[dict]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
+
+
+def format_for_training(task_description: str, code: str) -> str:
+    """Wrap clean code in Thought+Code format to match eval prompt.
+
+    For episodes where the model output raw code (no Thought),
+    this wraps it in the expected format so training data is consistent.
+    """
+    return (
+        f"Thought: I need to implement a function that "
+        f"{task_description[:100]}.\n"
+        f"Code:\n```python\n{code}\n```"
+    )
 
 
 def extract_code(response: str, task: dict | None = None) -> str:

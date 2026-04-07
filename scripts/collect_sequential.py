@@ -395,7 +395,7 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
     print(f"\n{'='*60}")
     print("COLLECTION COMPLETE")
     print(f"{'='*60}")
-    print(f"Total: {done}, Passed: {successes} ({successes/done:.1%})")
+    print(f"Total: {done}, Passed: {successes} ({successes/max(done,1):.1%})")
     print(f"Q-values: mean={q['mean_q']:.3f} std={q['std_q']:.3f}")
     print(f"  High (>=0.7): {q['high_q']}")
     print(f"  Mid (0.3-0.7): {q['mid_q']}")
