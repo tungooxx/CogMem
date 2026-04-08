@@ -94,18 +94,42 @@ def build_experience_summary(
 ) -> str:
     """Build a structured experience summary for a domain.
 
-    This is what the model "learned" from its experiences.
+    Q-values weight which experiences matter most:
+    - High-Q episodes (proven useful to other tasks) → trusted patterns
+    - Low-Q episodes (retrieved but didn't help) → less trusted
+    - Episodes sorted by Q so high-Q patterns appear first
     """
     total = len(success_episodes) + len(failure_episodes)
     success_rate = len(success_episodes) / max(total, 1)
 
-    imports = extract_import_patterns(success_episodes)
-    errors = extract_common_errors(failure_episodes)
-    patterns = extract_function_patterns(success_episodes)
+    # Sort by Q-value: high-Q episodes first (most trustworthy)
+    sorted_success = sorted(
+        success_episodes,
+        key=lambda ep: ep.get("q_value", 0.5),
+        reverse=True,
+    )
+    sorted_failures = sorted(
+        failure_episodes,
+        key=lambda ep: ep.get("q_visits", 0),
+        reverse=True,
+    )
+
+    # High-Q successes are most reliable for pattern extraction
+    high_q = [ep for ep in sorted_success if ep.get("q_value", 0.5) >= 0.6]
+    imports = extract_import_patterns(high_q or sorted_success)
+    errors = extract_common_errors(sorted_failures)
+    patterns = extract_function_patterns(high_q or sorted_success)
+
+    # Q-value stats
+    q_vals = [ep.get("q_value", 0.5) for ep in success_episodes]
+    avg_q = sum(q_vals) / len(q_vals) if q_vals else 0.5
+    n_high_q = len(high_q)
 
     lines = []
     lines.append(f"Based on your experience with {domain} tasks:")
     lines.append(f"You attempted {total} tasks, succeeded on {len(success_episodes)} ({success_rate:.0%}).")
+    if n_high_q > 0:
+        lines.append(f"Of these, {n_high_q} solutions were proven helpful to other tasks (high Q-value).")
     lines.append("")
 
     if imports:
@@ -126,10 +150,10 @@ def build_experience_summary(
             lines.append(f"  - {err}")
         lines.append("")
 
-    # Add 1-2 short successful code examples
-    if success_episodes:
-        lines.append("EXAMPLE OF GOOD CODE:")
-        example = success_episodes[0]
+    # Add 1-2 short successful code examples (highest Q first)
+    if sorted_success:
+        lines.append("EXAMPLE OF GOOD CODE (highest Q):")
+        example = sorted_success[0]
         code = example.get("final_code") or example.get("generated_code") or ""
         # Truncate to ~15 lines
         code_lines = code.split("\n")[:15]
@@ -149,37 +173,56 @@ def generate_llm_summary(
 ) -> str:
     """Use the LLM itself to reflect on its own experience.
 
-    The model generates a summary of what it learned from
-    its successes and failures in a domain.
+    Q-values guide the reflection:
+    - High-Q successes → "proven reliable patterns"
+    - Low-Q successes → "unreliable, warn about these"
+    - Failures → "mistakes to avoid"
     """
-    successes_text = ""
-    for ep in success_episodes[:3]:
-        code = ep.get("final_code") or ep.get("generated_code") or ""
-        desc = ep.get("task_description", "")[:100]
-        successes_text += f"\nTask: {desc}\nCode:\n{code[:300]}\n"
+    # Split by Q-value credibility
+    high_q = sorted(
+        [ep for ep in success_episodes if ep.get("q_value", 0.5) >= 0.6],
+        key=lambda ep: ep.get("q_value", 0), reverse=True,
+    )
+    low_q = [ep for ep in success_episodes if ep.get("q_value", 0.5) < 0.4]
 
-    failures_text = ""
-    for ep in failure_episodes[:3]:
-        code = ep.get("generated_code") or ""
-        desc = ep.get("task_description", "")[:100]
-        err = (ep.get("error") or "")[:200]
-        failures_text += f"\nTask: {desc}\nCode:\n{code[:200]}\nError: {err}\n"
+    def format_eps(eps, n=3, show_q=True):
+        text = ""
+        for ep in eps[:n]:
+            code = ep.get("final_code") or ep.get("generated_code") or ""
+            desc = ep.get("task_description", "")[:100]
+            q = ep.get("q_value", 0.5)
+            q_str = f" (Q={q:.2f})" if show_q else ""
+            text += f"\nTask: {desc}{q_str}\nCode:\n{code[:300]}\n"
+        return text or "\n(none)\n"
 
-    prompt = f"""You attempted {len(success_episodes) + len(failure_episodes)} {domain} coding tasks.
-You succeeded on {len(success_episodes)} and failed on {len(failure_episodes)}.
+    def format_fails(eps, n=3):
+        text = ""
+        for ep in eps[:n]:
+            code = ep.get("generated_code") or ""
+            desc = ep.get("task_description", "")[:100]
+            err = (ep.get("error") or "")[:200]
+            text += f"\nTask: {desc}\nCode:\n{code[:200]}\nError: {err}\n"
+        return text or "\n(none)\n"
 
-Here are some of your successes:
-{successes_text}
+    prompt = f"""You are reflecting on your coding experience with {domain} tasks.
 
-Here are some of your failures with their errors:
-{failures_text}
+YOUR MOST RELIABLE PATTERNS (high Q-value — these helped other tasks too):
+{format_eps(high_q)}
 
-Based on this experience, write a brief guide for yourself:
-1. What patterns work for {domain} tasks?
-2. What mistakes should you avoid?
-3. What libraries and functions are most useful?
+PATTERNS THAT LOOK GOOD BUT DON'T GENERALIZE (low Q — didn't help others):
+{format_eps(low_q)}
 
-Write this as practical rules you can follow. Be specific."""
+YOUR COMMON MISTAKES (failures with error messages):
+{format_fails(failure_episodes)}
+
+Based on this experience, write practical rules:
+1. What patterns RELIABLY work? (from high-Q experiences)
+2. What approaches should you AVOID? (from low-Q and failures)
+3. What common errors must you watch for?
+
+Focus on the HIGH-Q patterns — those are proven across multiple tasks.
+Be skeptical of low-Q patterns — they may be one-time lucky fixes.
+Write concise, actionable rules."""
 
     resp = llm_client.chat.completions.create(
         model=model_name,
