@@ -209,7 +209,7 @@ def build_prompt_with_retrieval(task_description, retrieved_episodes):
 # MAIN COLLECTION
 # ════════════════════════════════════════════
 
-def collect_sequential(tasks_path, resume=False, shuffle=False):
+def collect_sequential(tasks_path, resume=False, shuffle=False, model=None):
     """Process tasks sequentially with retrieval + Q-value updates.
 
     Args:
@@ -233,9 +233,11 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
         print("Shuffled task order (for cycle 1+ retrieval exposure)")
 
     # Initialize
+    active_model = model or MODEL_NAME
     embedder = SentenceTransformer(EMBEDDING_MODEL)
     client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
     bank = SequentialMemoryBank(MEMORY_BANK_PATH)
+    print(f"Model: {active_model}")
 
     # Resume support
     completed = set()
@@ -291,7 +293,7 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
                                      "content": f"Previous attempt failed:\n{prev_err}\nPlease fix."})
 
                 resp = client.chat.completions.create(
-                    model=MODEL_NAME, messages=messages,
+                    model=active_model, messages=messages,
                     max_tokens=2048, temperature=0,
                 )
                 response = resp.choices[0].message.content
@@ -349,7 +351,7 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
             "intent_embedding": task_embedding,
             "error": error,
             "entry_point": task.get("entry_point", ""),
-            "model": MODEL_NAME,
+            "model": active_model,
             "timestamp": time.time(),
         }
         bank.add(episode)
