@@ -209,7 +209,7 @@ def build_prompt_with_retrieval(task_description, retrieved_episodes):
 # MAIN COLLECTION
 # ════════════════════════════════════════════
 
-def collect_sequential(tasks_path, resume=False, shuffle=False):
+def collect_sequential(tasks_path, resume=False, shuffle=False, model=None, cycle=0):
     """Process tasks sequentially with retrieval + Q-value updates.
 
     Args:
@@ -233,9 +233,15 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
         print("Shuffled task order (for cycle 1+ retrieval exposure)")
 
     # Initialize
+    active_model = model or MODEL_NAME
+    # Bank path includes cycle number
+    bank_path = MEMORY_BANK_PATH.replace(".json", f"_cycle{cycle}.json")
     embedder = SentenceTransformer(EMBEDDING_MODEL)
     client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
-    bank = SequentialMemoryBank(MEMORY_BANK_PATH)
+    bank = SequentialMemoryBank(bank_path)
+    print(f"Model: {active_model}")
+    print(f"Cycle: {cycle}")
+    print(f"Bank: {bank_path}")
 
     # Resume support
     completed = set()
@@ -247,8 +253,11 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
         done = len(bank.episodes)  # use episode count for ID numbering
         successes = sum(1 for ep in bank.episodes if ep["success"])
     else:
+        # Fresh run: discard any stale data from a previous partial run
+        bank.episodes = []
+        bank.embeddings = []
         remaining = tasks
-        done = len(bank.episodes)  # non-zero if bank has prior data
+        done = 0
         successes = 0
     total_tasks = len(tasks)
 
@@ -291,7 +300,7 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
                                      "content": f"Previous attempt failed:\n{prev_err}\nPlease fix."})
 
                 resp = client.chat.completions.create(
-                    model=MODEL_NAME, messages=messages,
+                    model=active_model, messages=messages,
                     max_tokens=2048, temperature=0,
                 )
                 response = resp.choices[0].message.content
@@ -331,7 +340,7 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
 
         # 5. Store episode
         episode = {
-            "episode_id": f"bcb_seq_{done:04d}",
+            "episode_id": f"bcb_c{cycle}_{done:04d}",
             "task_id": task_id,
             "task_description": instruction,
             "generated_code": last_code,
@@ -349,7 +358,8 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
             "intent_embedding": task_embedding,
             "error": error,
             "entry_point": task.get("entry_point", ""),
-            "model": MODEL_NAME,
+            "model": active_model,
+            "cycle": cycle,
             "timestamp": time.time(),
         }
         bank.add(episode)
@@ -395,12 +405,15 @@ def collect_sequential(tasks_path, resume=False, shuffle=False):
     print(f"\n{'='*60}")
     print("COLLECTION COMPLETE")
     print(f"{'='*60}")
-    print(f"Total: {done}, Passed: {successes} ({successes/done:.1%})")
-    print(f"Q-values: mean={q['mean_q']:.3f} std={q['std_q']:.3f}")
-    print(f"  High (>=0.7): {q['high_q']}")
-    print(f"  Mid (0.3-0.7): {q['mid_q']}")
-    print(f"  Low (<0.3): {q['low_q']}")
-    print(f"  Ever retrieved: {q['ever_retrieved']}/{q['total']}")
+    print(f"Total: {done}, Passed: {successes} ({successes/max(done,1):.1%})")
+    if q:
+        print(f"Q-values: mean={q['mean_q']:.3f} std={q['std_q']:.3f}")
+        print(f"  High (>=0.7): {q['high_q']}")
+        print(f"  Mid (0.3-0.7): {q['mid_q']}")
+        print(f"  Low (<0.3): {q['low_q']}")
+        print(f"  Ever retrieved: {q['ever_retrieved']}/{q['total']}")
+    else:
+        print("No episodes collected!")
 
     return bank
 
@@ -473,6 +486,7 @@ if __name__ == "__main__":
     parser.add_argument("--tasks", default=None, help="Path to tasks JSONL")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--shuffle", action="store_true", help="Randomize task order (cycle 1+)")
+    parser.add_argument("--cycle", type=int, default=0, help="Cycle number (0, 1, 2, ...)")
     parser.add_argument("--analyze-only", action="store_true", help="Only analyze existing data")
     parser.add_argument("--model", default=MODEL_NAME, help="Ollama model name")
     parser.add_argument("--bank", default=MEMORY_BANK_PATH, help="Memory bank path")
@@ -482,7 +496,8 @@ if __name__ == "__main__":
     MEMORY_BANK_PATH = args.bank
 
     if args.analyze_only:
-        analyze_q_values(MEMORY_BANK_PATH)
+        bank_path = MEMORY_BANK_PATH.replace(".json", f"_cycle{args.cycle}.json")
+        analyze_q_values(bank_path)
     else:
         tasks_path = args.tasks
         if tasks_path is None:
@@ -502,6 +517,10 @@ if __name__ == "__main__":
         print(f"Memory bank: {MEMORY_BANK_PATH}")
         print()
 
-        bank = collect_sequential(tasks_path, resume=args.resume, shuffle=args.shuffle)
+        bank = collect_sequential(
+            tasks_path, resume=args.resume, shuffle=args.shuffle,
+            model=args.model, cycle=args.cycle,
+        )
+        bank_path = MEMORY_BANK_PATH.replace(".json", f"_cycle{args.cycle}.json")
         print("\nRunning Q-value analysis...")
-        analyze_q_values(MEMORY_BANK_PATH)
+        analyze_q_values(bank_path)

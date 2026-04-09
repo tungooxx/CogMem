@@ -40,6 +40,25 @@ def format_messages(task: dict, use_instruct: bool = True) -> list[dict]:
     ]
 
 
+def format_for_training(task_description: str, code: str) -> str:
+    """Wrap clean code in Thought+Code format to match eval prompt.
+
+    For episodes where the model output raw code (no Thought),
+    this wraps it in the expected format so training data is consistent.
+    """
+    first_line = task_description.split("\n")[0].strip()
+    truncated = first_line[:150]
+    # Only drop trailing partial word when we actually truncated
+    if len(first_line) > 150:
+        truncated = truncated.rsplit(" ", 1)[0]
+    desc = truncated.rstrip(".,;:")
+    return (
+        f"Thought: I need to implement a function that "
+        f"{desc}.\n"
+        f"Code:\n```python\n{code}\n```"
+    )
+
+
 def extract_code(response: str, task: dict | None = None) -> str:
     """Extract Python code from model response.
 

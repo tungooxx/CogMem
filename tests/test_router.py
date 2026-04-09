@@ -3,9 +3,14 @@ from cogmem.config import CogMemConfig
 from cogmem.consolidation.router import ConsolidatedDomain, route_task
 
 
+class RouterConfig:
+    """Minimal config for router tests."""
+    consolidation_match_threshold: float = 0.75
+    retrieval_min_q: float = 0.3
+
 @pytest.fixture
 def config():
-    return CogMemConfig(consolidation_match_threshold=0.75, retrieval_min_q=0.3)
+    return RouterConfig()
 
 
 @pytest.fixture

@@ -123,7 +123,7 @@ def _make_episode(
         "generated_code": last_code,
         "final_code": final_code,
         "success": success,
-        "q_value": 1.0 if success else -1.0,
+        "q_value": 1.0 if success else 0.0,  # outcome-based initial signal
         "error": trajectory[-1].get("error") if trajectory else None,
         "entry_point": task.get("entry_point", ""),
         "trajectory": trajectory,
