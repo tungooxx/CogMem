@@ -293,7 +293,7 @@ def build_sft_data_with_summaries(
         if not ep.get("success"):
             continue
 
-        code = ep.get("final_code", "")
+        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script") or ""
         desc = ep.get("task_description", "")
         if not code or not desc:
             continue

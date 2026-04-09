@@ -156,9 +156,10 @@ def run_wake_cycle(
                 patch_bank.add(new_patch)
                 patches_created += 1
 
-        # 6. Update Q-values of active patches
+        # 6. Update Q-values of active patches, then free weight memory
         for patch in active_patches:
             patch_bank.update_q(patch.patch_id, task_succeeded)
+            patch.unload_weights()
 
         # 7. Progress
         if (i + 1) % 10 == 0 or i < 5:

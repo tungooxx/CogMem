@@ -19,6 +19,7 @@ class PatchBank:
     def __init__(self, save_dir: str):
         self.save_dir = save_dir
         self.patches: list[CognitivePatch] = []
+        self.promoted: set[str] = set()  # patch IDs always included in active set
         self._embeddings: np.ndarray | None = None  # Nx384, lazy-built
         self._index: dict[str, int] = {}  # patch_id → index
 
@@ -64,9 +65,10 @@ class PatchBank:
         """Retrieve patches, re-rank by Q-value, return top-k for composition.
 
         Score = similarity * 0.4 + q_value * 0.6
+        Promoted patches are always included in the result regardless of score.
         """
         candidates = self.retrieve(query_embedding, top_k=top_k * 3)
-        if not candidates:
+        if not candidates and not self.promoted:
             return []
 
         query = np.array(query_embedding)
@@ -79,7 +81,17 @@ class PatchBank:
             scored.append((score, patch))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [patch for _, patch in scored[:top_k]]
+        result = [patch for _, patch in scored[:top_k]]
+
+        # Always include promoted patches (they've proven universally useful)
+        result_ids = {p.patch_id for p in result}
+        for pid in self.promoted:
+            if pid not in result_ids:
+                idx = self._index.get(pid)
+                if idx is not None:
+                    result.append(self.patches[idx])
+
+        return result
 
     def update_q(self, patch_id: str, task_succeeded: bool) -> None:
         """Update Q-value based on whether activation helped."""
@@ -113,7 +125,15 @@ class PatchBank:
             return
 
         with open(index_path) as f:
-            patch_ids = json.load(f)
+            raw = json.load(f)
+
+        # Support both old format (list of IDs) and new format (dict)
+        if isinstance(raw, list):
+            patch_ids = raw
+            self.promoted = set()
+        else:
+            patch_ids = raw.get("patch_ids", [])
+            self.promoted = set(raw.get("promoted", []))
 
         self.patches = []
         self._index = {}
@@ -126,7 +146,7 @@ class PatchBank:
                 print(f"Warning: could not load patch {pid}")
 
         self._embeddings = None
-        print(f"Loaded {len(self.patches)} patches from {self.save_dir}")
+        print(f"Loaded {len(self.patches)} patches ({len(self.promoted)} promoted) from {self.save_dir}")
 
     def load_weights(self, patch: CognitivePatch) -> None:
         """Lazy-load weights for a specific patch."""
@@ -166,4 +186,7 @@ class PatchBank:
         d = Path(self.save_dir)
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "index.json", "w") as f:
-            json.dump([p.patch_id for p in self.patches], f)
+            json.dump({
+                "patch_ids": [p.patch_id for p in self.patches],
+                "promoted": list(self.promoted),
+            }, f)

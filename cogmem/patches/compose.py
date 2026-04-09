@@ -50,27 +50,55 @@ def compose_patches(
     return deltas
 
 
+def _is_quantized(param: torch.Tensor) -> bool:
+    """Check if a parameter is quantized (e.g. 4-bit bitsandbytes)."""
+    return hasattr(param, "quant_state") or param.dtype == torch.uint8
+
+
 def apply_deltas(model: nn.Module, deltas: dict[str, torch.Tensor]) -> None:
     """Add computed deltas to model weights (in-place).
 
     Call this before generation, then remove_deltas after.
+    If a parameter is quantized (4-bit bnb), use data assignment instead of
+    in-place add, since quantized tensors don't support add_().
+    Rolls back all applied deltas if any single layer fails.
     """
-    state = model.state_dict()
-    for name, delta in deltas.items():
-        if name in state:
-            device = state[name].device
-            dtype = state[name].dtype
-            state[name].add_(delta.to(device=device, dtype=dtype))
+    state = dict(model.named_parameters())
+    applied = []
+    try:
+        for name, delta in deltas.items():
+            if name in state:
+                param = state[name]
+                d = delta.to(device=param.data.device, dtype=param.data.dtype)
+                if _is_quantized(param.data):
+                    param.data = param.data + d
+                else:
+                    param.data.add_(d)
+                applied.append(name)
+    except Exception:
+        # Rollback already-applied deltas
+        for applied_name in applied:
+            if applied_name in state and applied_name in deltas:
+                param = state[applied_name]
+                d = deltas[applied_name].to(device=param.data.device, dtype=param.data.dtype)
+                if _is_quantized(param.data):
+                    param.data = param.data - d
+                else:
+                    param.data.sub_(d)
+        raise
 
 
 def remove_deltas(model: nn.Module, deltas: dict[str, torch.Tensor]) -> None:
     """Remove deltas from model weights (reverse of apply_deltas)."""
-    state = model.state_dict()
+    state = dict(model.named_parameters())
     for name, delta in deltas.items():
         if name in state:
-            device = state[name].device
-            dtype = state[name].dtype
-            state[name].sub_(delta.to(device=device, dtype=dtype))
+            param = state[name]
+            d = delta.to(device=param.data.device, dtype=param.data.dtype)
+            if _is_quantized(param.data):
+                param.data = param.data - d
+            else:
+                param.data.sub_(d)
 
 
 class PatchedModel:

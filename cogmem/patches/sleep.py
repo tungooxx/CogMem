@@ -102,28 +102,47 @@ def _merge_similar(bank: PatchBank, cfg: dict) -> int:
 
 
 def _merge_patch_weights(target: CognitivePatch, source: CognitivePatch) -> None:
-    """Merge source patch into target via Q-weighted average."""
+    """Merge source patch into target via Q-weighted average of full deltas.
+
+    Averaging A and B matrices separately is incorrect because the LoRA
+    contribution is B@A (a product, not a sum).  Instead we:
+      1. Compute full delta D = B@A for each patch.
+      2. Q-weighted average the Ds.
+      3. SVD the averaged D back to low-rank (A_new, B_new) factors
+         at the target's rank.
+    """
     w_t = target.q_value
     w_s = source.q_value
     total = w_t + w_s + 1e-8
+    rank = max(target.rank, source.rank)
 
     for layer_key in set(target.lora_weights) | set(source.lora_weights):
         t_ab = target.lora_weights.get(layer_key, {})
         s_ab = source.lora_weights.get(layer_key, {})
 
-        merged = {}
-        for ab in ("A", "B"):
-            t_mat = t_ab.get(ab)
-            s_mat = s_ab.get(ab)
+        t_a, t_b = t_ab.get("A"), t_ab.get("B")
+        s_a, s_b = s_ab.get("A"), s_ab.get("B")
 
-            if t_mat is not None and s_mat is not None:
-                merged[ab] = (t_mat.float() * w_t + s_mat.float() * w_s) / total
-            elif t_mat is not None:
-                merged[ab] = t_mat
-            elif s_mat is not None:
-                merged[ab] = s_mat
+        # Compute full deltas D = B @ A for each patch that has both factors
+        t_delta = (t_b.float() @ t_a.float()) if (t_a is not None and t_b is not None) else None
+        s_delta = (s_b.float() @ s_a.float()) if (s_a is not None and s_b is not None) else None
 
-        target.lora_weights[layer_key] = merged
+        if t_delta is not None and s_delta is not None:
+            avg_delta = (t_delta * w_t + s_delta * w_s) / total
+        elif t_delta is not None:
+            avg_delta = t_delta
+        elif s_delta is not None:
+            avg_delta = s_delta
+        else:
+            continue
+
+        # SVD back to low-rank factors: avg_delta ≈ B_new @ A_new
+        U, S, Vh = torch.linalg.svd(avg_delta, full_matrices=False)
+        sqrt_s = torch.sqrt(S[:rank])
+        B_new = U[:, :rank] * sqrt_s.unsqueeze(0)   # (out, rank)
+        A_new = Vh[:rank, :] * sqrt_s.unsqueeze(1)   # (rank, in)
+
+        target.lora_weights[layer_key] = {"A": A_new, "B": B_new}
 
     # Update metadata
     target.q_value = (w_t * target.q_visits + w_s * source.q_visits) / max(
@@ -148,13 +167,19 @@ def _prune_bad(bank: PatchBank, cfg: dict) -> int:
 
 
 def _find_promotable(bank: PatchBank, cfg: dict) -> list[str]:
-    """Find patches that are candidates for permanent merging.
+    """Find patches that qualify for promotion and persist them.
 
     These patches have been reliably helpful across many tasks.
-    Returns list of patch_ids that could be promoted to a persistent adapter.
+    Promoted patch IDs are stored in the bank's ``promoted`` set so
+    that ``get_active_patches`` always includes them.
+
+    Returns list of newly promoted patch_ids.
     """
-    return [
+    newly_promoted = [
         p.patch_id for p in bank.patches
         if p.q_value >= cfg["promote_min_q"]
         and p.q_visits >= cfg["promote_min_visits"]
+        and p.patch_id not in bank.promoted
     ]
+    bank.promoted.update(newly_promoted)
+    return newly_promoted

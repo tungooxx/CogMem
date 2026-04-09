@@ -83,6 +83,10 @@ class CognitivePatch:
             created_at=meta.get("created_at", 0),
         )
 
+    def unload_weights(self) -> None:
+        """Clear lora_weights dict to free GPU/CPU memory."""
+        self.lora_weights = {}
+
     def memory_bytes(self) -> int:
         """Estimate memory usage of this patch's weights."""
         total = 0

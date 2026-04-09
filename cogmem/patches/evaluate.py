@@ -80,6 +80,9 @@ def evaluate_patched(
                 passed += 1
         except Exception:
             pass
+        finally:
+            for p in active_patches:
+                p.unload_weights()
 
         if (i + 1) % 50 == 0:
             print(f"    Patched eval: {passed}/{i+1} ({passed/(i+1):.1%})")
@@ -129,6 +132,9 @@ def evaluate_best_of_n(
                         break
                 except Exception:
                     continue
+
+        for p in active_patches:
+            p.unload_weights()
 
         if task_passed:
             passed += 1

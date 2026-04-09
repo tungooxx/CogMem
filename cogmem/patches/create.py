@@ -12,6 +12,7 @@ Method C: From cluster of similar experiences
 """
 
 import gc
+import tempfile
 import time
 from pathlib import Path
 
@@ -91,7 +92,7 @@ def create_patch_from_contrast(
     dataset = Dataset.from_list([tok])
 
     # Train for a few steps
-    tmp_dir = f"/tmp/cogmem_patch_{patch_id}"
+    tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     training_args = TrainingArguments(
         output_dir=tmp_dir,
         num_train_epochs=n_steps,  # n_steps on 1 example = n_steps epochs
@@ -113,11 +114,14 @@ def create_patch_from_contrast(
 
     trainer.train()
 
-    # Extract LoRA weights
+    # Extract LoRA weights before cleanup
     lora_weights = _extract_lora_weights(model)
 
-    # Cleanup: remove LoRA from base model
-    model = model.merge_and_unload()
+    # Cleanup: delete peft wrapper without mutating base model.
+    # merge_and_unload() would permanently modify base_model weights.
+    del model, trainer
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # Clean up temp dir
     import shutil
@@ -174,7 +178,13 @@ def create_patch_from_cluster(
 
     Args:
         examples: List of {"prompt": str, "code": str} dicts.
+
+    Raises:
+        ValueError: If examples list is empty.
     """
+    if not examples:
+        raise ValueError("Cannot create cluster patch from empty examples list")
+
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
     from datasets import Dataset
 
@@ -206,7 +216,7 @@ def create_patch_from_cluster(
 
     dataset = Dataset.from_list(data)
 
-    tmp_dir = f"/tmp/cogmem_patch_{patch_id}"
+    tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     training_args = TrainingArguments(
         output_dir=tmp_dir,
         num_train_epochs=max(1, n_steps // len(data)),
@@ -229,7 +239,11 @@ def create_patch_from_cluster(
 
     trainer.train()
     lora_weights = _extract_lora_weights(model)
-    model = model.merge_and_unload()
+
+    # Cleanup: delete peft wrapper without mutating base model.
+    del model, trainer
+    gc.collect()
+    torch.cuda.empty_cache()
 
     import shutil
     if Path(tmp_dir).exists():
