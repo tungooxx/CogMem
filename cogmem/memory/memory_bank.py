@@ -48,8 +48,17 @@ class MemoryBank:
 
     def add(self, episode: dict) -> None:
         """Add an episode to the bank."""
-        self._episodes.append(episode)
-        self._index[episode["episode_id"]] = episode
+        if "episode_id" not in episode:
+            raise ValueError("Episode must contain 'episode_id'")
+        eid = episode["episode_id"]
+        if eid in self._index:
+            # Update existing episode in-place
+            idx = next(i for i, ep in enumerate(self._episodes) if ep["episode_id"] == eid)
+            self._episodes[idx] = episode
+            self._index[eid] = episode
+        else:
+            self._episodes.append(episode)
+            self._index[eid] = episode
 
     def get(self, episode_id: str) -> dict | None:
         return self._index.get(episode_id)
@@ -58,10 +67,10 @@ class MemoryBank:
         return [ep for ep in self._episodes if ep.get("success")]
 
     def by_task_type(self, task_type: str) -> list[dict]:
-        return [ep for ep in self._episodes if ep.get("task_type") == task_type]
+        return [ep for ep in self._episodes if ep.get("task_type", "general") == task_type]
 
     def task_types(self) -> set[str]:
-        return {ep.get("task_type", "") for ep in self._episodes}
+        return {ep.get("task_type", "general") for ep in self._episodes}
 
     def completed_task_ids(self) -> set[str]:
         """Get set of task_ids that have been attempted."""
@@ -98,6 +107,8 @@ class MemoryBank:
     def stratified_holdout(
         self, n: int, seed: int = 42
     ) -> tuple[list[dict], list[dict]]:
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
         rng = random.Random(seed)
         by_type = defaultdict(list)
         for ep in self._episodes:
@@ -133,7 +144,16 @@ class MemoryBank:
 
     def summary_metrics(self) -> dict:
         if not self._episodes:
-            return {"total_episodes": 0}
+            return {
+                "total_episodes": 0,
+                "success_rate": 0.0,
+                "success_rate_by_type": {},
+                "q_value_stats": {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0},
+                "high_q_episodes": 0,
+                "mid_q_episodes": 0,
+                "low_q_episodes": 0,
+                "ever_retrieved": 0,
+            }
 
         q_values = [ep.get("q_value", Q_INITIAL) for ep in self._episodes]
         successes = [ep for ep in self._episodes if ep.get("success")]
