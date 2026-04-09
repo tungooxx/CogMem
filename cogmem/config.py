@@ -45,7 +45,7 @@ class CogMemConfig:
     embedding_model: str = "all-MiniLM-L6-v2"
 
     # --- Curriculum learning (for general model) ---
-    use_curriculum: bool = False
+    use_curriculum: bool = True  # default matches active_model=general
     bigcodebench_full_tasks: int = 1140
 
     # --- Ollama ---
@@ -106,23 +106,20 @@ class CogMemConfig:
     min_holdout: int = 20
     regression_threshold: float = 0.05
 
-    # --- Legacy compat ---
-    memory_bank_path: str = "results/memory_bank.json"
+    # --- Memory bank ---
+    memory_bank_path: str = "results/bigcodebench/memory_bank_sequential.json"
+
+    # --- Legacy compat (used by old train_lora.py, run_experiment_1) ---
     replay_buffer_path: str = ""
     lora_provider: str = "local"
     together_api_key: str = ""
-    base_model: str = "Qwen/Qwen2.5-3B-Instruct"  # synced with active_model_hf
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct"
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_epochs: int = 3
     lora_learning_rate: float = 1e-5
     lora_batch_size: str = "max"
     verification_holdout: int = 20
-    min_cluster_size: int = 3
-    consolidation_match_threshold: float = 0.75
-    retrieval_min_q: float = 0.3
-    eval_model_api_base: str = "http://localhost:11434/v1"
-    eval_model: str = "qwen2.5-coder:3b"
 
     def set_active_model(self, model_type: str) -> None:
         """Set active model to 'coder' or 'general'."""
