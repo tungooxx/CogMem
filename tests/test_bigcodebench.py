@@ -216,7 +216,7 @@ class TestRunner:
                            final_code="return 1")
         assert ep["task_id"] == "BigCodeBench/42"
         assert ep["success"] is True
-        assert ep["q_value"] == 0.5  # starts neutral, updated by retrieval
+        assert ep["q_value"] == 1.0  # success -> 1.0 initial signal
         assert "bigcode_" in ep["episode_id"]
         assert ep["trajectory"] == trajectory
         assert ep["final_code"] == "return 1"
@@ -232,7 +232,7 @@ class TestRunner:
         ep = _make_episode(task, trajectory=trajectory, success=False,
                            final_code=None)
         assert ep["success"] is False
-        assert ep["q_value"] == 0.5  # starts neutral for failures too
+        assert ep["q_value"] == 0.0  # failure -> 0.0 initial signal
         assert ep["num_attempts"] == 1
 
     def test_load_episodes(self):

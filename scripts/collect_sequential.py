@@ -253,8 +253,11 @@ def collect_sequential(tasks_path, resume=False, shuffle=False, model=None, cycl
         done = len(bank.episodes)  # use episode count for ID numbering
         successes = sum(1 for ep in bank.episodes if ep["success"])
     else:
+        # Fresh run: discard any stale data from a previous partial run
+        bank.episodes = []
+        bank.embeddings = []
         remaining = tasks
-        done = len(bank.episodes)  # non-zero if bank has prior data
+        done = 0
         successes = 0
     total_tasks = len(tasks)
 
@@ -493,7 +496,8 @@ if __name__ == "__main__":
     MEMORY_BANK_PATH = args.bank
 
     if args.analyze_only:
-        analyze_q_values(MEMORY_BANK_PATH)
+        bank_path = MEMORY_BANK_PATH.replace(".json", f"_cycle{args.cycle}.json")
+        analyze_q_values(bank_path)
     else:
         tasks_path = args.tasks
         if tasks_path is None:

@@ -43,8 +43,8 @@ class MemoryBank:
         return iter(self._episodes)
 
     @property
-    def episodes(self) -> list[dict]:
-        return self._episodes
+    def episodes(self) -> tuple[dict, ...]:
+        return tuple(self._episodes)
 
     def add(self, episode: dict) -> None:
         """Add an episode to the bank."""

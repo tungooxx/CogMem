@@ -13,6 +13,8 @@ import json
 import re
 from collections import Counter
 
+from cogmem.benchmarks.bigcodebench.prompts import format_for_training
+
 
 def categorize_domain(code: str, task_desc: str) -> str:
     """Categorize a task by its primary library/domain."""
@@ -304,11 +306,12 @@ def build_sft_data_with_summaries(
         else:
             user_content = desc
 
+        assistant_content = format_for_training(desc, code)
         sft_data.append({
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
-                {"role": "assistant", "content": code},
+                {"role": "assistant", "content": assistant_content},
             ]
         })
 
