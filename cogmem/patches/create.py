@@ -117,9 +117,16 @@ def create_patch_from_contrast(
     # Extract LoRA weights before cleanup
     lora_weights = _extract_lora_weights(model)
 
-    # Cleanup: delete peft wrapper without mutating base model.
+    # Cleanup: properly remove PEFT adapter to undo hooks on base_model.
     # merge_and_unload() would permanently modify base_model weights.
-    del model, trainer
+    # delete_adapter + get_base_model cleanly restores the original model.
+    del trainer
+    try:
+        model.disable_adapter_layers()
+        model.delete_adapter("default")
+    except Exception:
+        pass  # best-effort cleanup
+    del model
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -240,8 +247,14 @@ def create_patch_from_cluster(
     trainer.train()
     lora_weights = _extract_lora_weights(model)
 
-    # Cleanup: delete peft wrapper without mutating base model.
-    del model, trainer
+    # Cleanup: properly remove PEFT adapter to undo hooks on base_model.
+    del trainer
+    try:
+        model.disable_adapter_layers()
+        model.delete_adapter("default")
+    except Exception:
+        pass  # best-effort cleanup
+    del model
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -270,8 +283,9 @@ def _extract_lora_weights(peft_model) -> dict:
         if "lora_" in name and param.requires_grad:
             # name like: model.layers.0.self_attn.q_proj.lora_A.default.weight
             parts = name.split(".")
-            # Extract layer identifier
-            layer_key = ".".join(p for p in parts if p not in ("lora_A", "lora_B", "default", "weight"))
+            # Extract layer identifier: strip only lora_A/lora_B/default tokens,
+            # keep ".weight" so the key matches model.named_parameters() in compose.py
+            layer_key = ".".join(p for p in parts if p not in ("lora_A", "lora_B", "default"))
             ab = "A" if "lora_A" in name else "B"
 
             if layer_key not in weights:

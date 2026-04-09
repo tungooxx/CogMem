@@ -115,23 +115,27 @@ def run_wake_cycle(
         ]
 
         candidates = []
-        with PatchedModel(base_model, active_patches):
-            for _ in range(n_candidates):
-                try:
-                    response = generate_with_model(
-                        base_model, tokenizer, messages,
-                        temperature=temperature,
-                    )
-                    code = extract_code(response)
-                    if code and len(code.strip()) > 20:
-                        result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
-                        candidates.append({
-                            "code": code,
-                            "passed": result["passed"],
-                            "response": response,
-                        })
-                except Exception:
-                    continue
+        try:
+            with PatchedModel(base_model, active_patches):
+                for _ in range(n_candidates):
+                    try:
+                        response = generate_with_model(
+                            base_model, tokenizer, messages,
+                            temperature=temperature,
+                        )
+                        code = extract_code(response)
+                        if code and len(code.strip()) > 20:
+                            result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
+                            candidates.append({
+                                "code": code,
+                                "passed": result["passed"],
+                                "response": response,
+                            })
+                    except Exception:
+                        continue
+        finally:
+            for patch in active_patches:
+                patch.unload_weights()
 
         passes = [c for c in candidates if c["passed"]]
         fails = [c for c in candidates if not c["passed"]]
@@ -156,10 +160,9 @@ def run_wake_cycle(
                 patch_bank.add(new_patch)
                 patches_created += 1
 
-        # 6. Update Q-values of active patches, then free weight memory
+        # 6. Update Q-values of active patches
         for patch in active_patches:
             patch_bank.update_q(patch.patch_id, task_succeeded)
-            patch.unload_weights()
 
         # 7. Progress
         if (i + 1) % 10 == 0 or i < 5:

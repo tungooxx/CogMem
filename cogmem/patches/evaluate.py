@@ -119,22 +119,23 @@ def evaluate_best_of_n(
         ]
 
         task_passed = False
-        with PatchedModel(base_model, active_patches):
-            for _ in range(n):
-                try:
-                    response = generate_with_model(
-                        base_model, tokenizer, messages, temperature=temperature
-                    )
-                    code = extract_code(response)
-                    result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
-                    if result["passed"]:
-                        task_passed = True
-                        break
-                except Exception:
-                    continue
-
-        for p in active_patches:
-            p.unload_weights()
+        try:
+            with PatchedModel(base_model, active_patches):
+                for _ in range(n):
+                    try:
+                        response = generate_with_model(
+                            base_model, tokenizer, messages, temperature=temperature
+                        )
+                        code = extract_code(response)
+                        result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
+                        if result["passed"]:
+                            task_passed = True
+                            break
+                    except Exception:
+                        continue
+        finally:
+            for p in active_patches:
+                p.unload_weights()
 
         if task_passed:
             passed += 1

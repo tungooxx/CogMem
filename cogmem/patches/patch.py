@@ -31,12 +31,17 @@ class CognitivePatch:
     created_at: float = field(default_factory=time.time)
 
     def save(self, directory: str) -> None:
-        """Save patch as .pt (weights) + .json (metadata)."""
+        """Save patch as .pt (weights) + .json (metadata).
+
+        Skips writing .pt file if lora_weights is empty (e.g. loaded
+        with load_weights=False) to avoid overwriting real weights on disk.
+        """
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
 
-        # Save weights
-        torch.save(self.lora_weights, str(d / f"{self.patch_id}.pt"))
+        # Save weights only if they are loaded
+        if self.lora_weights:
+            torch.save(self.lora_weights, str(d / f"{self.patch_id}.pt"))
 
         # Save metadata (everything except weights)
         meta = {
