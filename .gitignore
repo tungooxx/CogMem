@@ -22,3 +22,6 @@ logs/
 
 # Notebooks with outputs (may contain secrets)
 paperspace*.ipynb
+
+# Archived old notebooks
+notebooks_archive/
