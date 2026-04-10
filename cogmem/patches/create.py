@@ -290,9 +290,14 @@ def _extract_lora_weights(peft_model) -> dict:
         if "lora_" in name and param.requires_grad:
             # name like: model.layers.0.self_attn.q_proj.lora_A.default.weight
             parts = name.split(".")
-            # Extract layer identifier: strip only lora_A/lora_B/default tokens,
+            # Extract layer identifier: strip lora_A/lora_B/default tokens,
             # keep ".weight" so the key matches model.named_parameters() in compose.py
             layer_key = ".".join(p for p in parts if p not in ("lora_A", "lora_B", "default"))
+            # Strip PEFT wrapper prefix (base_model.model.) to match base model param names
+            for prefix in ("base_model.model.", "base_model."):
+                if layer_key.startswith(prefix):
+                    layer_key = layer_key[len(prefix):]
+                    break
             ab = "A" if "lora_A" in name else "B"
 
             if layer_key not in weights:
