@@ -208,9 +208,7 @@ def create_patch_from_cluster(
         task_type="CAUSAL_LM",
     )
 
-    from peft import prepare_model_for_kbit_training
-
-    prepare_model_for_kbit_training(base_model)
+    # base_model must have prepare_model_for_kbit_training called ONCE by caller
     model = get_peft_model(base_model, lora_config)
 
     # Prepare training data

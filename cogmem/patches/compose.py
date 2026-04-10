@@ -70,6 +70,7 @@ def compose_patches(
         layers = model.transformer.h
 
     if layers is None:
+        print("Warning: unrecognized model architecture — no layers found for patch composition")
         return hooks
 
     proj_names = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -122,8 +123,8 @@ def compose_patches(
 
             if combined_delta is not None:
                 def make_hook(d):
-                    def hook(module, input, output):
-                        x = input[0].float()
+                    def hook(module, inp, output):
+                        x = inp[0].float()
                         lora_out = x @ d.T
                         return output + lora_out.to(output.dtype)
                     return hook
