@@ -73,6 +73,9 @@ def create_patch_from_contrast(
 
     # base_model must have prepare_model_for_kbit_training called ONCE by caller
     model = get_peft_model(base_model, lora_config)
+    # Disable gradient checkpointing for micro-training (5 steps, not worth the overhead)
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
 
     # Prepare single training example
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
@@ -102,7 +105,7 @@ def create_patch_from_contrast(
         logging_steps=n_steps,
         save_strategy="no",
         report_to="none",
-        fp16=True,
+        fp16=False,
         seed=42,
     )
 
@@ -237,7 +240,7 @@ def create_patch_from_cluster(
         logging_steps=n_steps,
         save_strategy="no",
         report_to="none",
-        fp16=True,
+        fp16=False,
         seed=42,
     )
 
