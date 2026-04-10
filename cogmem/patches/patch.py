@@ -70,8 +70,12 @@ class CognitivePatch:
 
         weights = {}
         if load_weights:
-            weights = torch.load(str(d / f"{patch_id}.pt"), map_location="cpu",
-                                 weights_only=True)
+            pt_path = d / f"{patch_id}.pt"
+            if pt_path.exists():
+                weights = torch.load(str(pt_path), map_location="cpu",
+                                     weights_only=True)
+            else:
+                print(f"Warning: weights file missing for {patch_id}")
 
         return cls(
             patch_id=meta["patch_id"],

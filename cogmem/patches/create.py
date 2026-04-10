@@ -309,10 +309,10 @@ def _describe_contrast(failed_code: str, passed_code: str) -> str:
 
     parts = []
     if added:
-        sample = list(added)[0].strip()[:60]
+        sample = next(iter(added)).strip()[:60]
         parts.append(f"added: {sample}")
     if removed:
-        sample = list(removed)[0].strip()[:60]
+        sample = next(iter(removed)).strip()[:60]
         parts.append(f"removed: {sample}")
 
     return "; ".join(parts) if parts else "code restructured"

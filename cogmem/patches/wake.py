@@ -146,7 +146,7 @@ def run_wake_cycle(
 
         # 5. Create patch from contrast
         if passes and fails:
-            best_pair, sim = find_best_contrast_pair(passes, fails)
+            best_pair, _ = find_best_contrast_pair(passes, fails)
             if best_pair:
                 new_patch = create_patch_from_contrast(
                     base_model, tokenizer,
