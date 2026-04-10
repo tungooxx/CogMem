@@ -113,8 +113,21 @@ def compose_patches(
                 if a is None or b is None:
                     continue
 
+                # Shape check: B @ A must produce (out_features, in_features)
+                if b.dim() != 2 or a.dim() != 2 or b.shape[1] != a.shape[0]:
+                    print(f"Warning: shape mismatch for {patch.patch_id} at {matched_key}: "
+                          f"B={tuple(b.shape)} A={tuple(a.shape)}, skipping")
+                    continue
+
                 device = module.weight.device
                 delta = (b.float().to(device) @ a.float().to(device)) * patch.q_value * scaling_factor
+
+                # Verify delta shape matches module weight
+                w_shape = module.weight.shape
+                if delta.shape != w_shape:
+                    print(f"Warning: delta shape {tuple(delta.shape)} != weight shape {tuple(w_shape)} "
+                          f"for {patch.patch_id} at {proj_name}, skipping")
+                    continue
 
                 if combined_delta is None:
                     combined_delta = delta
@@ -129,7 +142,14 @@ def compose_patches(
                         return output + lora_out.to(output.dtype)
                     return hook
 
-                h = module.register_forward_hook(make_hook(combined_delta))
-                hooks.append(h)
+                try:
+                    h = module.register_forward_hook(make_hook(combined_delta))
+                    hooks.append(h)
+                except Exception:
+                    # Rollback all hooks on failure
+                    for handle in hooks:
+                        handle.remove()
+                    hooks.clear()
+                    raise
 
     return hooks
