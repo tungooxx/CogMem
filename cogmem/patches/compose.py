@@ -1,11 +1,11 @@
-"""Dynamic patch composition — apply micro-LoRA patches to base model.
+"""Dynamic patch composition via forward hooks for quantized models.
 
-For quantized (4-bit) models, we can't modify weights directly.
-Instead, we use forward hooks: intercept each linear layer's output
-and add the LoRA delta: output = original_output + input @ A.T @ B.T * scale
+4-bit quantized weights can't be modified directly. Instead we register
+forward hooks that add LoRA deltas at the activation level:
 
-This is mathematically equivalent to W' = W + B @ A, but applied
-at the activation level rather than the weight level.
+    hooked_output = original_output + input @ delta.T
+
+Deltas are precomputed once (sum all patches per layer), not per forward pass.
 """
 
 import torch
@@ -14,69 +14,14 @@ import torch.nn as nn
 from cogmem.patches.patch import CognitivePatch
 
 
-def compose_patches(
-    model: nn.Module,
-    patches: list[CognitivePatch],
-    scaling_factor: float = 1.0,
-) -> dict[str, torch.Tensor]:
-    """Compute the combined LoRA delta from all active patches.
-
-    Returns a dict of {param_name: delta_tensor}.
-    Each patch contributes: B @ A * q_value * scaling_factor
-    """
-    deltas = {}
-
-    for patch in patches:
-        if not patch.lora_weights:
-            continue
-
-        q_scale = patch.q_value * scaling_factor
-
-        for layer_key, ab in patch.lora_weights.items():
-            a = ab.get("A")
-            b = ab.get("B")
-            if a is None or b is None:
-                continue
-
-            delta = (b.float() @ a.float()) * q_scale
-
-            if layer_key in deltas:
-                deltas[layer_key] = deltas[layer_key] + delta
-            else:
-                deltas[layer_key] = delta
-
-    return deltas
-
-
-def _find_module(model: nn.Module, name: str) -> nn.Module | None:
-    """Find a module by its parameter name (strip '.weight' suffix)."""
-    # name like: model.layers.0.self_attn.q_proj.weight
-    # module path: model.layers.0.self_attn.q_proj
-    parts = name.replace(".weight", "").replace(".bias", "").split(".")
-    module = model
-    for part in parts:
-        if hasattr(module, part):
-            module = getattr(module, part)
-        elif part.isdigit() and hasattr(module, "__getitem__"):
-            module = module[int(part)]
-        else:
-            return None
-    return module
-
-
 class PatchedModel:
     """Context manager that applies patches via forward hooks.
 
-    For 4-bit models, we can't modify quantized weights. Instead,
-    we register hooks on each attention projection layer that add
-    the LoRA delta to the layer's output:
+    Usage:
+        with PatchedModel(model, patches) as patched:
+            output = patched.generate(...)
 
-        hooked_output = original_output + input @ A.T @ B.T * scale
-
-    This is mathematically equivalent to:
-        (W + B @ A) @ input.T = W @ input.T + (B @ A) @ input.T
-
-    Hooks are automatically removed when the context manager exits.
+    Hooks auto-removed on exit.
     """
 
     def __init__(self, model: nn.Module, patches: list[CognitivePatch],
@@ -87,72 +32,103 @@ class PatchedModel:
         self._hooks = []
 
     def __enter__(self):
-        # Build per-module delta lookup
-        # Group LoRA A,B by module path (without .weight)
-        module_deltas = {}  # module_path -> {"A": tensor, "B": tensor}
+        self._hooks = compose_patches(self.model, self.patches, self.scaling_factor)
+        return self.model
 
-        for patch in self.patches:
-            if not patch.lora_weights:
+    def __exit__(self, *args):
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+
+
+def compose_patches(
+    model: nn.Module,
+    patches: list[CognitivePatch],
+    scaling_factor: float = 1.0,
+) -> list:
+    """Register forward hooks that apply LoRA deltas per layer.
+
+    Precomputes combined delta per layer (sum of all patches),
+    then registers one hook per layer. Returns list of hook handles
+    that the caller must remove after generation.
+
+    Args:
+        model: Base model (can be quantized).
+        patches: Active patches with loaded lora_weights.
+        scaling_factor: Global scaling for all patches.
+
+    Returns:
+        List of hook handles. Remove them after generation.
+    """
+    hooks = []
+
+    # Find model layers
+    layers = None
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        layers = model.transformer.h
+
+    if layers is None:
+        return hooks
+
+    proj_names = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+    for layer_idx, layer in enumerate(layers):
+        if not hasattr(layer, "self_attn"):
+            continue
+
+        for proj_name in proj_names:
+            module = getattr(layer.self_attn, proj_name, None)
+            if module is None:
                 continue
 
-            q_scale = patch.q_value * self.scaling_factor
+            # Sum all patch deltas for this layer+projection
+            combined_delta = None
 
-            for layer_key, ab in patch.lora_weights.items():
+            for patch in patches:
+                if not patch.lora_weights:
+                    continue
+
+                # Try multiple key formats
+                possible_keys = [
+                    f"model.layers.{layer_idx}.self_attn.{proj_name}.weight",
+                    f"layers.{layer_idx}.self_attn.{proj_name}.weight",
+                    f"model.model.layers.{layer_idx}.self_attn.{proj_name}.weight",
+                ]
+
+                matched_key = None
+                for key in possible_keys:
+                    if key in patch.lora_weights:
+                        matched_key = key
+                        break
+
+                if matched_key is None:
+                    continue
+
+                ab = patch.lora_weights[matched_key]
                 a = ab.get("A")
                 b = ab.get("B")
                 if a is None or b is None:
                     continue
 
-                # module path = layer_key without .weight
-                mod_path = layer_key.replace(".weight", "")
+                device = module.weight.device
+                delta = (b.float().to(device) @ a.float().to(device)) * patch.q_value * scaling_factor
 
-                if mod_path not in module_deltas:
-                    module_deltas[mod_path] = {"A": a.float() * q_scale, "B": b.float()}
+                if combined_delta is None:
+                    combined_delta = delta
                 else:
-                    # Stack: add scaled A, keep B (they share the same B if same layer)
-                    # Actually for multiple patches, we need full delta
-                    existing = module_deltas[mod_path]
-                    # Combine: delta = B1 @ A1 + B2 @ A2
-                    # Store as pre-computed delta instead
-                    if "delta" not in existing:
-                        existing["delta"] = existing["B"] @ existing["A"]
-                    existing["delta"] = existing["delta"] + (b.float() @ (a.float() * q_scale))
+                    combined_delta = combined_delta + delta
 
-        # Register forward hooks
-        for mod_path, weights in module_deltas.items():
-            module = _find_module(self.model, mod_path)
-            if module is None:
-                continue
+            if combined_delta is not None:
+                def make_hook(d):
+                    def hook(module, input, output):
+                        x = input[0].float()
+                        lora_out = x @ d.T
+                        return output + lora_out.to(output.dtype)
+                    return hook
 
-            # Pre-compute delta if not already
-            if "delta" in weights:
-                delta = weights["delta"]
-            else:
-                delta = weights["B"] @ weights["A"]
+                h = module.register_forward_hook(make_hook(combined_delta))
+                hooks.append(h)
 
-            # Capture delta in closure
-            def make_hook(d):
-                def hook(module, input, output):
-                    # output shape: (batch, seq_len, out_features)
-                    # delta shape: (out_features, in_features)
-                    # input[0] shape: (batch, seq_len, in_features)
-                    if isinstance(input, tuple) and len(input) > 0:
-                        x = input[0]
-                        # LoRA: output += x @ delta.T
-                        device = output.device
-                        dtype = output.dtype
-                        lora_out = x.float() @ d.to(device).T
-                        return output + lora_out.to(dtype)
-                    return output
-                return hook
-
-            handle = module.register_forward_hook(make_hook(delta))
-            self._hooks.append(handle)
-
-        return self.model
-
-    def __exit__(self, *args):
-        # Remove all hooks
-        for handle in self._hooks:
-            handle.remove()
-        self._hooks.clear()
+    return hooks
