@@ -122,13 +122,6 @@ def compose_patches(
                 device = module.weight.device
                 delta = (b.float().to(device) @ a.float().to(device)) * patch.q_value * scaling_factor
 
-                # Verify delta shape matches module weight
-                w_shape = module.weight.shape
-                if delta.shape != w_shape:
-                    print(f"Warning: delta shape {tuple(delta.shape)} != weight shape {tuple(w_shape)} "
-                          f"for {patch.patch_id} at {proj_name}, skipping")
-                    continue
-
                 if combined_delta is None:
                     combined_delta = delta
                 else:
