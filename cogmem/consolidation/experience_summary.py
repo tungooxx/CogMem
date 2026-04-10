@@ -293,7 +293,7 @@ def build_sft_data_with_summaries(
         if not ep.get("success"):
             continue
 
-        code = ep.get("final_code") or ep.get("generated_code") or ""
+        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script") or ""
         desc = ep.get("task_description", "")
         if not code or not desc:
             continue
@@ -306,13 +306,18 @@ def build_sft_data_with_summaries(
         else:
             user_content = desc
 
-        assistant_content = format_for_training(desc, code)
-        sft_data.append({
+        # Q-weighted copies: high-Q episodes get more training weight
+        q = max(ep.get("q_value", 0.5), 0.0)
+        copies = max(1, round(q * 5))
+
+        pair = {
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
-                {"role": "assistant", "content": assistant_content},
+                {"role": "assistant", "content": code},
             ]
-        })
+        }
+        for _ in range(copies):
+            sft_data.append(pair)
 
     return sft_data
