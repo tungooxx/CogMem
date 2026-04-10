@@ -124,8 +124,8 @@ def create_patch_from_contrast(
     try:
         model.disable_adapter_layers()
         model.delete_adapter("default")
-    except Exception:
-        pass  # best-effort cleanup
+    except Exception as e:
+        print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
     del model
     gc.collect()
     torch.cuda.empty_cache()
@@ -252,8 +252,8 @@ def create_patch_from_cluster(
     try:
         model.disable_adapter_layers()
         model.delete_adapter("default")
-    except Exception:
-        pass  # best-effort cleanup
+    except Exception as e:
+        print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
     del model
     gc.collect()
     torch.cuda.empty_cache()
