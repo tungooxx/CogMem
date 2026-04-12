@@ -368,27 +368,42 @@ def _cleanup_patch_training(model, tmp_dir: str) -> None:
     can_unload = hasattr(model, "base_model") and hasattr(model.base_model, "unload")
     can_disable = hasattr(model, "disable_adapter_layers")
     can_delete = hasattr(model, "delete_adapter")
+    cleanup_errors: list[tuple[str, Exception]] = []
+
+    def run_disable_and_delete() -> None:
+        if can_disable:
+            try:
+                model.disable_adapter_layers()
+            except Exception as e:
+                cleanup_errors.append(("disable_adapter_layers", e))
+        if can_delete:
+            try:
+                model.delete_adapter("default")
+            except Exception as e:
+                cleanup_errors.append(("delete_adapter", e))
 
     try:
         if can_unload:
-            model.base_model.unload()
-        elif can_disable and can_delete:
-            model.disable_adapter_layers()
-            model.delete_adapter("default")
-    except Exception as e:
-        if can_disable and can_delete:
             try:
-                model.disable_adapter_layers()
-                model.delete_adapter("default")
-            except Exception:
-                pass
-        print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
+                model.base_model.unload()
+            except Exception as e:
+                cleanup_errors.append(("base_model.unload", e))
+                run_disable_and_delete()
+        else:
+            run_disable_and_delete()
+    finally:
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    if Path(tmp_dir).exists():
-        shutil.rmtree(tmp_dir)
+        if Path(tmp_dir).exists():
+            shutil.rmtree(tmp_dir)
+
+    if cleanup_errors:
+        details = ", ".join(
+            f"{name}: {type(err).__name__}: {err}" for name, err in cleanup_errors
+        )
+        raise RuntimeError(f"Patch cleanup failed ({details})") from cleanup_errors[0][1]
 
 
 def _normalize_loss_entry(

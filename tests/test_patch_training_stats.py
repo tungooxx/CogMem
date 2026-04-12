@@ -12,11 +12,13 @@ class DummyTokenizer:
 
 
 class DummyPeftModel:
-    def __init__(self, unload_raises=False):
+    def __init__(self, unload_raises=False, disable_raises=False, delete_raises=False):
         self.gradient_checkpointing_disabled = False
         self.adapter_disabled = False
         self.deleted_adapter = None
         self.unload_raises = unload_raises
+        self.disable_raises = disable_raises
+        self.delete_raises = delete_raises
         self.base_model = SimpleNamespace()
         self.base_model.unloaded = False
         self.base_model.unload = self._unload_base_model
@@ -25,9 +27,13 @@ class DummyPeftModel:
         self.gradient_checkpointing_disabled = True
 
     def disable_adapter_layers(self):
+        if self.disable_raises:
+            raise RuntimeError("disable failed")
         self.adapter_disabled = True
 
     def delete_adapter(self, name):
+        if self.delete_raises:
+            raise RuntimeError("delete failed")
         self.deleted_adapter = name
 
     def _unload_base_model(self):
@@ -203,7 +209,30 @@ def test_cleanup_patch_training_falls_back_when_unload_fails(monkeypatch):
     monkeypatch.setattr("cogmem.patches.create.gc.collect", lambda: None)
     monkeypatch.setattr("cogmem.patches.create.torch.cuda.empty_cache", lambda: None)
 
-    _cleanup_patch_training(dummy_model, "does-not-exist")
+    try:
+        _cleanup_patch_training(dummy_model, "does-not-exist")
+    except RuntimeError as exc:
+        assert "base_model.unload" in str(exc)
+    else:
+        raise AssertionError("Expected unload failure to be visible")
 
     assert dummy_model.adapter_disabled is True
+    assert dummy_model.deleted_adapter == "default"
+
+
+def test_cleanup_patch_training_attempts_disable_and_delete_independently(monkeypatch):
+    from cogmem.patches.create import _cleanup_patch_training
+
+    dummy_model = DummyPeftModel(unload_raises=True, disable_raises=True)
+    monkeypatch.setattr("cogmem.patches.create.gc.collect", lambda: None)
+    monkeypatch.setattr("cogmem.patches.create.torch.cuda.empty_cache", lambda: None)
+
+    try:
+        _cleanup_patch_training(dummy_model, "does-not-exist")
+    except RuntimeError as exc:
+        assert "base_model.unload" in str(exc)
+        assert "disable_adapter_layers" in str(exc)
+    else:
+        raise AssertionError("Expected cleanup failure to raise RuntimeError")
+
     assert dummy_model.deleted_adapter == "default"
