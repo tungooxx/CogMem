@@ -128,10 +128,10 @@ def compose_patches(
                 
                 delta = (b.float().to(device) @ a.float().to(device)) * lora_scale * patch.q_value * scaling_factor
 
-                # Verify delta shape matches module weight
-                w_shape = module.weight.shape
-                if delta.shape != w_shape:
-                    print(f"Warning: delta shape {tuple(delta.shape)} != weight shape {tuple(w_shape)} "
+                # Validate against the logical projection shape, not packed quantized storage.
+                expected_shape = _get_logical_projection_shape(module)
+                if expected_shape is not None and delta.shape != expected_shape:
+                    print(f"Warning: delta shape {tuple(delta.shape)} != expected shape {tuple(expected_shape)} "
                           f"for {patch.patch_id} at {proj_name}, skipping")
                     continue
 
@@ -144,6 +144,8 @@ def compose_patches(
                 def make_hook(d):
                     def hook(module, inp, output):
                         x = inp[0].float()
+                        if x.shape[-1] != d.shape[1] or output.shape[-1] != d.shape[0]:
+                            return output
                         lora_out = x @ d.T
                         return output + lora_out.to(output.dtype)
                     return hook
@@ -159,3 +161,22 @@ def compose_patches(
                     raise
 
     return hooks
+
+
+def _get_logical_projection_shape(module: nn.Module) -> tuple[int, int] | None:
+    """Return the logical (out_features, in_features) shape for a projection module."""
+    out_features = getattr(module, "out_features", None)
+    in_features = getattr(module, "in_features", None)
+    if out_features is not None and in_features is not None:
+        return int(out_features), int(in_features)
+
+    module_name = module.__class__.__name__
+    weight = getattr(module, "weight", None)
+    if (
+        weight is not None
+        and getattr(weight, "dim", lambda: 0)() == 2
+        and (isinstance(module, nn.Linear) or module_name in {"Linear", "NonDynamicallyQuantizableLinear"})
+    ):
+        return tuple(int(v) for v in weight.shape)
+
+    return None
