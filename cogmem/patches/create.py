@@ -104,6 +104,8 @@ def create_patch_from_contrast(
         learning_rate=lr,
         lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
         logging_steps=10,
+        logging_first_step=True,
+        disable_tqdm=True,  # plain print output so every 10-step log is visible in Jupyter
         save_strategy="no",
         report_to="none",
         fp16=False,
@@ -238,6 +240,8 @@ def create_patch_from_cluster(
         learning_rate=lr,
         lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
         logging_steps=10,
+        logging_first_step=True,
+        disable_tqdm=True,  # plain print output so every 10-step log is visible in Jupyter
         save_strategy="no",
         report_to="none",
         fp16=False,
