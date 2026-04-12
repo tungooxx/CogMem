@@ -12,10 +12,11 @@ class DummyTokenizer:
 
 
 class DummyPeftModel:
-    def __init__(self):
+    def __init__(self, unload_raises=False):
         self.gradient_checkpointing_disabled = False
         self.adapter_disabled = False
         self.deleted_adapter = None
+        self.unload_raises = unload_raises
         self.base_model = SimpleNamespace()
         self.base_model.unloaded = False
         self.base_model.unload = self._unload_base_model
@@ -30,6 +31,8 @@ class DummyPeftModel:
         self.deleted_adapter = name
 
     def _unload_base_model(self):
+        if self.unload_raises:
+            raise RuntimeError("unload failed")
         self.base_model.unloaded = True
         return self.base_model
 
@@ -191,3 +194,16 @@ def test_ensure_clean_base_model_rejects_stale_peft_layers():
         assert "already contains PEFT layers" in str(exc)
     else:
         raise AssertionError("Expected stale PEFT layers to raise RuntimeError")
+
+
+def test_cleanup_patch_training_falls_back_when_unload_fails(monkeypatch):
+    from cogmem.patches.create import _cleanup_patch_training
+
+    dummy_model = DummyPeftModel(unload_raises=True)
+    monkeypatch.setattr("cogmem.patches.create.gc.collect", lambda: None)
+    monkeypatch.setattr("cogmem.patches.create.torch.cuda.empty_cache", lambda: None)
+
+    _cleanup_patch_training(dummy_model, "does-not-exist")
+
+    assert dummy_model.adapter_disabled is True
+    assert dummy_model.deleted_adapter == "default"

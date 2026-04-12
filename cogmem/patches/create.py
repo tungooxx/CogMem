@@ -365,13 +365,23 @@ def _train_patch_adapter(
 
 def _cleanup_patch_training(model, tmp_dir: str) -> None:
     """Remove adapter state and temporary files."""
+    can_unload = hasattr(model, "base_model") and hasattr(model.base_model, "unload")
+    can_disable = hasattr(model, "disable_adapter_layers")
+    can_delete = hasattr(model, "delete_adapter")
+
     try:
-        if hasattr(model, "base_model") and hasattr(model.base_model, "unload"):
+        if can_unload:
             model.base_model.unload()
-        else:
+        elif can_disable and can_delete:
             model.disable_adapter_layers()
             model.delete_adapter("default")
     except Exception as e:
+        if can_disable and can_delete:
+            try:
+                model.disable_adapter_layers()
+                model.delete_adapter("default")
+            except Exception:
+                pass
         print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
     del model
     gc.collect()
