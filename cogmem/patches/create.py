@@ -1,33 +1,83 @@
 """Create cognitive patches from experience contrasts.
 
-Method A: From fail→pass contrast (Approach 1: micro-finetune)
-  Train rank-2 LoRA for 5-10 steps on (prompt, passed_code).
-  The resulting LoRA captures "how to solve this type of problem."
+Method A: From fail-to-pass contrast (Approach 1: micro-finetune)
+  Train a tiny LoRA on (prompt, passed_code).
+  The resulting adapter captures "how to solve this type of problem."
 
 Method B: From programmatic mutation
   Mutate passing code, test if it breaks, create patch from contrast.
 
 Method C: From cluster of similar experiences
-  Group similar episodes, train rank-4 LoRA on the cluster.
+  Group similar episodes, train one patch on the cluster.
 """
 
 import gc
+import shutil
 import tempfile
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
     DataCollatorForSeq2Seq,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
+from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
 from cogmem.patches.patch import CognitivePatch
+
+DEFAULT_PATCH_RANK = 2
+DEFAULT_PATCH_TRAIN_STEPS = 30
+DEFAULT_PATCH_LR = 2e-3
+DEFAULT_PATCH_LOG_EVERY_STEPS = 1
+
+
+@dataclass
+class PatchTrainingStats:
+    """Compact training trace for one micro-finetune run."""
+
+    total_steps: int
+    final_loss: float | None
+    loss_history: list[dict[str, float | int | None]] = field(default_factory=list)
+
+
+class _PatchTrainingTraceCallback(TrainerCallback):
+    """Collect and optionally print loss entries during micro-training."""
+
+    def __init__(self, total_steps: int, show_progress: bool = False):
+        self.total_steps = total_steps
+        self.show_progress = show_progress
+        self.loss_history: list[dict[str, float | int | None]] = []
+        self._seen_steps: set[int] = set()
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        log_entry = dict(logs or {})
+        if "epoch" not in log_entry and state.epoch is not None:
+            log_entry["epoch"] = state.epoch
+        entry = _normalize_loss_entry(
+            log_entry,
+            fallback_step=state.global_step,
+        )
+        if entry is None:
+            return
+
+        step = int(entry["step"])
+        if step in self._seen_steps:
+            return
+
+        self._seen_steps.add(step)
+        self.loss_history.append(entry)
+
+        if self.show_progress:
+            epoch = entry["epoch"]
+            epoch_text = "n/a" if epoch is None else f"{epoch:.2f}"
+            print(
+                f"    step {step}/{self.total_steps} | "
+                f"epoch={epoch_text} | loss={entry['loss']:.4f}"
+            )
 
 
 def create_patch_from_contrast(
@@ -37,14 +87,17 @@ def create_patch_from_contrast(
     failed_code: str,
     passed_code: str,
     patch_id: str,
-    rank: int = 2,
-    n_steps: int = 30,
-    lr: float = 2e-3,
-) -> CognitivePatch:
+    rank: int = DEFAULT_PATCH_RANK,
+    n_steps: int = DEFAULT_PATCH_TRAIN_STEPS,
+    lr: float = DEFAULT_PATCH_LR,
+    show_progress: bool = False,
+    log_every_steps: int = DEFAULT_PATCH_LOG_EVERY_STEPS,
+    return_stats: bool = False,
+) -> CognitivePatch | tuple[CognitivePatch, PatchTrainingStats]:
     """Create a patch by micro-finetuning on the passing example.
 
-    Approach 1: Train a fresh rank-2 LoRA for a few steps on
-    (prompt, passed_code). The resulting tiny adapter captures
+    Approach 1: Train a fresh LoRA for a few steps on
+    (prompt, passed_code). The resulting adapter captures
     "how to solve this type of problem."
 
     Args:
@@ -55,13 +108,15 @@ def create_patch_from_contrast(
         passed_code: Code that passed (training target).
         patch_id: Unique identifier for this patch.
         rank: LoRA rank (2-4).
-        n_steps: Number of gradient steps (5-10).
-        lr: Learning rate (high, since few steps).
+        n_steps: Number of optimizer steps.
+        lr: Learning rate for micro-training.
+        show_progress: If True, print compact per-step loss lines.
+        log_every_steps: Logging interval for trainer loss events.
+        return_stats: If True, return ``(patch, stats)``.
 
     Returns:
-        CognitivePatch with tiny LoRA weights.
+        CognitivePatch with tiny LoRA weights, optionally with training stats.
     """
-    # Create a fresh rank-2 LoRA (zero-initialized)
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -71,14 +126,12 @@ def create_patch_from_contrast(
         task_type="CAUSAL_LM",
     )
 
-    # base_model must have prepare_model_for_kbit_training called ONCE by caller
     model = get_peft_model(base_model, lora_config)
-    # Disable gradient checkpointing for micro-training (5 steps, not worth the overhead)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
 
-    # Prepare single training example
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
+    from datasets import Dataset
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -90,70 +143,35 @@ def create_patch_from_contrast(
     )
     tok = tokenizer(text, truncation=True, max_length=1024, padding=False)
     tok["labels"] = tok["input_ids"].copy()
-
-    from datasets import Dataset
-
     dataset = Dataset.from_list([tok])
 
-    # Train for a few steps
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
-    training_args = TrainingArguments(
-        output_dir=tmp_dir,
-        num_train_epochs=n_steps,  # n_steps on 1 example = n_steps epochs
-        per_device_train_batch_size=1,
-        learning_rate=lr,
-        lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
-        logging_steps=10,
-        logging_first_step=True,
-        disable_tqdm=True,  # plain print output so every 10-step log is visible in Jupyter
-        save_strategy="no",
-        report_to="none",
-        fp16=False,
-        seed=42,
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
-    )
-
-    trainer.train()
-
-    # Extract LoRA weights before cleanup
-    lora_weights = _extract_lora_weights(model)
-
-    # Cleanup: properly remove PEFT adapter to undo hooks on base_model.
-    # merge_and_unload() would permanently modify base_model weights.
-    # delete_adapter + get_base_model cleanly restores the original model.
-    del trainer
     try:
-        model.disable_adapter_layers()
-        model.delete_adapter("default")
-    except Exception as e:
-        print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
+        stats = _train_patch_adapter(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=dataset,
+            output_dir=tmp_dir,
+            n_steps=n_steps,
+            lr=lr,
+            show_progress=show_progress,
+            log_every_steps=log_every_steps,
+        )
+        lora_weights = _extract_lora_weights(model)
+    finally:
+        _cleanup_patch_training(model, tmp_dir)
 
-    # Clean up temp dir
-    import shutil
-    if Path(tmp_dir).exists():
-        shutil.rmtree(tmp_dir)
-
-    # Create description from the contrast
     desc = _describe_contrast(failed_code, passed_code)
-
-    return CognitivePatch(
+    patch = CognitivePatch(
         patch_id=patch_id,
-        embedding=[],  # caller should set this
+        embedding=[],
         lora_weights=lora_weights,
         rank=rank,
-        source_task_id="",  # caller should set this
+        source_task_id="",
         source_type="fail_to_pass",
         description=desc,
     )
+    return (patch, stats) if return_stats else patch
 
 
 def create_patch_from_example(
@@ -162,18 +180,27 @@ def create_patch_from_example(
     task_prompt: str,
     code: str,
     patch_id: str,
-    rank: int = 2,
-    n_steps: int = 20,
-    lr: float = 2e-3,
-) -> CognitivePatch:
-    """Create a patch from a single successful example.
-
-    Simpler than contrast — just learn this one pattern.
-    """
+    rank: int = DEFAULT_PATCH_RANK,
+    n_steps: int = DEFAULT_PATCH_TRAIN_STEPS,
+    lr: float = DEFAULT_PATCH_LR,
+    show_progress: bool = False,
+    log_every_steps: int = DEFAULT_PATCH_LOG_EVERY_STEPS,
+    return_stats: bool = False,
+) -> CognitivePatch | tuple[CognitivePatch, PatchTrainingStats]:
+    """Create a patch from a single successful example."""
     return create_patch_from_contrast(
-        base_model, tokenizer,
-        task_prompt, "", code,
-        patch_id, rank, n_steps, lr,
+        base_model,
+        tokenizer,
+        task_prompt,
+        "",
+        code,
+        patch_id,
+        rank=rank,
+        n_steps=n_steps,
+        lr=lr,
+        show_progress=show_progress,
+        log_every_steps=log_every_steps,
+        return_stats=return_stats,
     )
 
 
@@ -183,12 +210,13 @@ def create_patch_from_cluster(
     examples: list[dict],
     patch_id: str,
     rank: int = 4,
-    n_steps: int = 20,
+    n_steps: int = DEFAULT_PATCH_TRAIN_STEPS,
     lr: float = 5e-4,
-) -> CognitivePatch:
+    show_progress: bool = False,
+    log_every_steps: int = DEFAULT_PATCH_LOG_EVERY_STEPS,
+    return_stats: bool = False,
+) -> CognitivePatch | tuple[CognitivePatch, PatchTrainingStats]:
     """Create a patch from a cluster of similar successful episodes.
-
-    More signal than single-experience patches, captures shared pattern.
 
     Args:
         examples: List of {"prompt": str, "code": str} dicts.
@@ -211,10 +239,10 @@ def create_patch_from_cluster(
         task_type="CAUSAL_LM",
     )
 
-    # base_model must have prepare_model_for_kbit_training called ONCE by caller
     model = get_peft_model(base_model, lora_config)
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
 
-    # Prepare training data
     data = []
     for ex in examples:
         messages = [
@@ -232,20 +260,68 @@ def create_patch_from_cluster(
     dataset = Dataset.from_list(data)
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
+    try:
+        stats = _train_patch_adapter(
+            model=model,
+            tokenizer=tokenizer,
+            dataset=dataset,
+            output_dir=tmp_dir,
+            n_steps=n_steps,
+            lr=lr,
+            gradient_accumulation_steps=min(4, len(data)),
+            show_progress=show_progress,
+            log_every_steps=log_every_steps,
+        )
+        lora_weights = _extract_lora_weights(model)
+    finally:
+        _cleanup_patch_training(model, tmp_dir)
+
+    patch = CognitivePatch(
+        patch_id=patch_id,
+        embedding=[],
+        lora_weights=lora_weights,
+        rank=rank,
+        source_type="cluster",
+        description=f"Cluster of {len(examples)} similar episodes",
+    )
+    return (patch, stats) if return_stats else patch
+
+
+# -------------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------------
+
+def _train_patch_adapter(
+    model,
+    tokenizer,
+    dataset,
+    output_dir: str,
+    n_steps: int,
+    lr: float,
+    gradient_accumulation_steps: int = 1,
+    show_progress: bool = False,
+    log_every_steps: int = DEFAULT_PATCH_LOG_EVERY_STEPS,
+) -> PatchTrainingStats:
+    """Train one tiny adapter and return a compact loss trace."""
+    trace_callback = _PatchTrainingTraceCallback(
+        total_steps=n_steps,
+        show_progress=show_progress,
+    )
     training_args = TrainingArguments(
-        output_dir=tmp_dir,
-        num_train_epochs=max(1, n_steps // len(data)),
+        output_dir=output_dir,
+        max_steps=n_steps,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=min(4, len(data)),
+        gradient_accumulation_steps=max(1, gradient_accumulation_steps),
         learning_rate=lr,
         lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
-        logging_steps=10,
+        logging_strategy="steps",
+        logging_steps=max(1, log_every_steps),
         logging_first_step=True,
-        disable_tqdm=True,  # plain print output so every 10-step log is visible in Jupyter
         save_strategy="no",
         report_to="none",
         fp16=False,
         seed=42,
+        disable_tqdm=True,  # use compact text logs instead of the notebook widget
     )
 
     trainer = Trainer(
@@ -253,13 +329,28 @@ def create_patch_from_cluster(
         args=training_args,
         train_dataset=dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
+        callbacks=[trace_callback],
+    )
+    trainer.remove_callback(PrinterCallback)
+    trainer.remove_callback(ProgressCallback)
+
+    train_result = trainer.train()
+    loss_history = trace_callback.loss_history or _extract_loss_history(
+        trainer.state.log_history
+    )
+    final_loss = _extract_final_loss(trainer.state.log_history)
+    if final_loss is None and getattr(train_result, "training_loss", None) is not None:
+        final_loss = float(train_result.training_loss)
+
+    return PatchTrainingStats(
+        total_steps=int(trainer.state.global_step or n_steps),
+        final_loss=final_loss,
+        loss_history=loss_history,
     )
 
-    trainer.train()
-    lora_weights = _extract_lora_weights(model)
 
-    # Cleanup: properly remove PEFT adapter to undo hooks on base_model.
-    del trainer
+def _cleanup_patch_training(model, tmp_dir: str) -> None:
+    """Remove adapter state and temporary files."""
     try:
         model.disable_adapter_layers()
         model.delete_adapter("default")
@@ -269,35 +360,73 @@ def create_patch_from_cluster(
     gc.collect()
     torch.cuda.empty_cache()
 
-    import shutil
     if Path(tmp_dir).exists():
         shutil.rmtree(tmp_dir)
 
-    return CognitivePatch(
-        patch_id=patch_id,
-        embedding=[],
-        lora_weights=lora_weights,
-        rank=rank,
-        source_type="cluster",
-        description=f"Cluster of {len(examples)} similar episodes",
-    )
+
+def _normalize_loss_entry(
+    entry: dict,
+    fallback_step: int | None = None,
+) -> dict[str, float | int | None] | None:
+    """Normalize one trainer log entry into the public loss-history shape."""
+    if "loss" not in entry:
+        return None
+
+    step = entry.get("step", fallback_step)
+    if step is None:
+        return None
+
+    epoch = entry.get("epoch")
+    return {
+        "step": int(step),
+        "epoch": None if epoch is None else float(epoch),
+        "loss": float(entry["loss"]),
+    }
 
 
-# -------------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------------
+def _extract_loss_history(
+    log_history: list[dict] | None,
+) -> list[dict[str, float | int | None]]:
+    """Extract monotonic loss entries from Trainer log history."""
+    history: list[dict[str, float | int | None]] = []
+    seen_steps: set[int] = set()
+    next_step = 1
+
+    for entry in log_history or []:
+        normalized = _normalize_loss_entry(entry, fallback_step=next_step)
+        if normalized is None:
+            continue
+
+        step = int(normalized["step"])
+        if step in seen_steps:
+            continue
+
+        history.append(normalized)
+        seen_steps.add(step)
+        next_step = step + 1
+
+    return history
+
+
+def _extract_final_loss(log_history: list[dict] | None) -> float | None:
+    """Get the final logged loss for a training run."""
+    for entry in reversed(log_history or []):
+        if "loss" in entry:
+            return float(entry["loss"])
+        if "train_loss" in entry:
+            return float(entry["train_loss"])
+    return None
+
 
 def _extract_lora_weights(peft_model) -> dict:
     """Extract LoRA A and B matrices from a peft model."""
     weights = {}
     for name, param in peft_model.named_parameters():
         if "lora_" in name and param.requires_grad:
-            # name like: model.layers.0.self_attn.q_proj.lora_A.default.weight
             parts = name.split(".")
-            # Extract layer identifier: strip lora_A/lora_B/default tokens,
-            # keep ".weight" so the key matches model.named_parameters() in compose.py
-            layer_key = ".".join(p for p in parts if p not in ("lora_A", "lora_B", "default"))
-            # Strip PEFT wrapper prefix (base_model.model.) to match base model param names
+            layer_key = ".".join(
+                p for p in parts if p not in ("lora_A", "lora_B", "default")
+            )
             for prefix in ("base_model.model.", "base_model."):
                 if layer_key.startswith(prefix):
                     layer_key = layer_key[len(prefix):]
@@ -316,7 +445,6 @@ def _describe_contrast(failed_code: str, passed_code: str) -> str:
     if not failed_code:
         return "learned pattern from successful example"
 
-    # Simple diff: find lines that differ
     failed_lines = set(failed_code.strip().split("\n"))
     passed_lines = set(passed_code.strip().split("\n"))
 
