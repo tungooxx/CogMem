@@ -38,8 +38,8 @@ def create_patch_from_contrast(
     passed_code: str,
     patch_id: str,
     rank: int = 2,
-    n_steps: int = 10,
-    lr: float = 1e-3,
+    n_steps: int = 30,
+    lr: float = 2e-3,
 ) -> CognitivePatch:
     """Create a patch by micro-finetuning on the passing example.
 
@@ -160,8 +160,8 @@ def create_patch_from_example(
     code: str,
     patch_id: str,
     rank: int = 2,
-    n_steps: int = 5,
-    lr: float = 1e-3,
+    n_steps: int = 20,
+    lr: float = 2e-3,
 ) -> CognitivePatch:
     """Create a patch from a single successful example.
 

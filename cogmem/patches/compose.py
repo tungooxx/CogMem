@@ -120,7 +120,13 @@ def compose_patches(
                     continue
 
                 device = module.weight.device
-                delta = (b.float().to(device) @ a.float().to(device)) * patch.q_value * scaling_factor
+                
+                # Apply proper LoRA scaling: lora_alpha / rank
+                # In create.py, lora_alpha = rank * 2, so scaling is always 2.0
+                # We also apply the patch's q_value and the global scaling_factor
+                lora_scale = (patch.rank * 2) / patch.rank if hasattr(patch, 'rank') and patch.rank else 2.0
+                
+                delta = (b.float().to(device) @ a.float().to(device)) * lora_scale * patch.q_value * scaling_factor
 
                 # Verify delta shape matches module weight
                 w_shape = module.weight.shape
