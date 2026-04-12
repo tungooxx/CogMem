@@ -120,6 +120,17 @@ def create_patch_from_contrast(
     """
     _ensure_clean_base_model(base_model)
 
+    from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
+    from datasets import Dataset
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": task_prompt},
+        {"role": "assistant", "content": passed_code},
+    ]
+    tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
+    dataset = Dataset.from_list([tok])
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -132,17 +143,6 @@ def create_patch_from_contrast(
     model = get_peft_model(base_model, lora_config)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
-
-    from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
-    from datasets import Dataset
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": task_prompt},
-        {"role": "assistant", "content": passed_code},
-    ]
-    tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
-    dataset = Dataset.from_list([tok])
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     try:
@@ -230,6 +230,18 @@ def create_patch_from_cluster(
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
     from datasets import Dataset
 
+    data = []
+    for ex in examples:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": ex["prompt"]},
+            {"role": "assistant", "content": ex["code"]},
+        ]
+        tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
+        data.append(tok)
+
+    dataset = Dataset.from_list(data)
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -242,18 +254,6 @@ def create_patch_from_cluster(
     model = get_peft_model(base_model, lora_config)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
-
-    data = []
-    for ex in examples:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": ex["prompt"]},
-            {"role": "assistant", "content": ex["code"]},
-        ]
-        tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
-        data.append(tok)
-
-    dataset = Dataset.from_list(data)
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     try:
@@ -471,7 +471,13 @@ def _tokenize_training_messages(tokenizer, messages: list[dict], max_length: int
         text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False
         )
-        tok = tokenizer(text, truncation=True, max_length=max_length, padding=False)
+        tok = tokenizer(
+            text,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            add_special_tokens=False,
+        )
         tok["labels"] = tok["input_ids"].copy()
         return tok
 
@@ -486,10 +492,8 @@ def _tokenize_training_messages(tokenizer, messages: list[dict], max_length: int
 
     assistant_tokens = sum(int(v) for v in assistant_mask)
     if assistant_tokens <= 0:
-        raise ValueError(
-            "Training sample has no assistant tokens after tokenization/truncation; "
-            "increase max_length or shorten the prompt/code."
-        )
+        tok["labels"] = input_ids.copy()
+        return tok
 
     tok["labels"] = [
         token_id if int(mask_value) else -100
