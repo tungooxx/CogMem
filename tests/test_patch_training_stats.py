@@ -16,6 +16,9 @@ class DummyPeftModel:
         self.gradient_checkpointing_disabled = False
         self.adapter_disabled = False
         self.deleted_adapter = None
+        self.base_model = SimpleNamespace()
+        self.base_model.unloaded = False
+        self.base_model.unload = self._unload_base_model
 
     def gradient_checkpointing_disable(self):
         self.gradient_checkpointing_disabled = True
@@ -25,6 +28,10 @@ class DummyPeftModel:
 
     def delete_adapter(self, name):
         self.deleted_adapter = name
+
+    def _unload_base_model(self):
+        self.base_model.unloaded = True
+        return self.base_model
 
 
 def test_extract_loss_history_monotonic_steps():
@@ -104,8 +111,7 @@ def test_create_patch_from_contrast_return_stats_false(monkeypatch):
     assert patch.rank == create_mod.DEFAULT_PATCH_RANK
     assert patch.lora_weights["layer.weight"]["A"] == "a"
     assert dummy_model.gradient_checkpointing_disabled is True
-    assert dummy_model.adapter_disabled is True
-    assert dummy_model.deleted_adapter == "default"
+    assert dummy_model.base_model.unloaded is True
 
 
 def test_create_patch_from_contrast_return_stats_true(monkeypatch):
@@ -155,3 +161,33 @@ def test_create_patch_from_contrast_return_stats_true(monkeypatch):
     assert observed["lr"] == 1e-3
     assert observed["show_progress"] is True
     assert observed["log_every_steps"] == 1
+    assert dummy_model.base_model.unloaded is True
+
+
+def test_ensure_clean_base_model_rejects_stale_peft_layers():
+    from cogmem.patches.create import _ensure_clean_base_model
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    class StaleLayer(BaseTunerLayer):
+        def __init__(self):
+            self._base_layer = None
+            self._disable_adapters = False
+            self.merged_adapters = []
+
+        def get_base_layer(self):
+            return None
+
+        def merge(self, *args, **kwargs):
+            return None
+
+        def unmerge(self, *args, **kwargs):
+            return None
+
+    stale_model = SimpleNamespace(modules=lambda: [StaleLayer()])
+
+    try:
+        _ensure_clean_base_model(stale_model)
+    except RuntimeError as exc:
+        assert "already contains PEFT layers" in str(exc)
+    else:
+        raise AssertionError("Expected stale PEFT layers to raise RuntimeError")
