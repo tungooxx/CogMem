@@ -4,10 +4,43 @@ from cogmem.patches.patch import CognitivePatch
 
 
 class DummyTokenizer:
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+    def __init__(self):
+        self.call_kwargs = None
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        truncation=False,
+        max_length=None,
+        padding=False,
+        return_dict=False,
+        return_assistant_tokens_mask=False,
+        **kwargs,
+    ):
+        if tokenize:
+            result = {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+            if return_assistant_tokens_mask:
+                result["assistant_masks"] = [0, 1, 1]
+            return result
         return "chat text"
 
-    def __call__(self, text, truncation=True, max_length=1024, padding=False):
+    def __call__(
+        self,
+        text,
+        truncation=True,
+        max_length=1024,
+        padding=False,
+        add_special_tokens=True,
+        **kwargs,
+    ):
+        self.call_kwargs = {
+            "truncation": truncation,
+            "max_length": max_length,
+            "padding": padding,
+            "add_special_tokens": add_special_tokens,
+        }
         return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
 
 
@@ -64,9 +97,63 @@ def test_extract_loss_history_monotonic_steps():
 def test_extract_final_loss_prefers_last_loss_then_train_loss():
     from cogmem.patches.create import _extract_final_loss
 
-    assert _extract_final_loss([{"train_loss": 9.0}, {"loss": 2.5}]) == 2.5
+    assert _extract_final_loss([{"loss": 2.5}, {"train_loss": 9.0}]) == 2.5
     assert _extract_final_loss([{"train_loss": 1.25}]) == 1.25
     assert _extract_final_loss([]) is None
+
+
+def test_tokenize_training_messages_masks_non_assistant_tokens():
+    from cogmem.patches.create import _tokenize_training_messages
+
+    tok = _tokenize_training_messages(
+        DummyTokenizer(),
+        [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+        max_length=1024,
+    )
+
+    assert tok["labels"] == [-100, 2, 3]
+
+
+def test_tokenize_training_messages_falls_back_when_assistant_mask_is_all_zero():
+    from cogmem.patches.create import _tokenize_training_messages
+
+    class ZeroAssistantTokenizer(DummyTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            if kwargs.get("tokenize"):
+                return {
+                    "input_ids": [1, 2, 3],
+                    "attention_mask": [1, 1, 1],
+                    "assistant_masks": [0, 0, 0],
+                }
+            return super().apply_chat_template(*args, **kwargs)
+
+    tok = _tokenize_training_messages(
+        ZeroAssistantTokenizer(),
+        [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+        max_length=1024,
+    )
+
+    assert tok["labels"] == [1, 2, 3]
+
+
+def test_tokenize_training_messages_fallback_tokenizer_skips_special_tokens():
+    from cogmem.patches.create import _tokenize_training_messages
+
+    class FallbackTokenizer(DummyTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            if kwargs.get("tokenize"):
+                raise TypeError("assistant masks unsupported")
+            return super().apply_chat_template(*args, **kwargs)
+
+    tokenizer = FallbackTokenizer()
+    tok = _tokenize_training_messages(
+        tokenizer,
+        [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+        max_length=1024,
+    )
+
+    assert tok["labels"] == [1, 2, 3]
+    assert tokenizer.call_kwargs["add_special_tokens"] is False
 
 
 def test_patch_training_callback_collects_logs(capsys):
@@ -123,6 +210,38 @@ def test_create_patch_from_contrast_return_stats_false(monkeypatch):
     assert dummy_model.base_model.unloaded is True
 
 
+def test_create_patch_from_contrast_tokenizes_before_attaching_lora(monkeypatch):
+    from cogmem.patches import create as create_mod
+
+    observed = {"get_peft_called": False}
+
+    def fail_tokenization(*args, **kwargs):
+        raise ValueError("bad training sample")
+
+    def fake_get_peft_model(base_model, config):
+        observed["get_peft_called"] = True
+        return DummyPeftModel()
+
+    monkeypatch.setattr(create_mod, "_tokenize_training_messages", fail_tokenization)
+    monkeypatch.setattr(create_mod, "get_peft_model", fake_get_peft_model)
+
+    try:
+        create_mod.create_patch_from_contrast(
+            base_model=object(),
+            tokenizer=DummyTokenizer(),
+            task_prompt="write a function",
+            failed_code="return 0",
+            passed_code="return 1",
+            patch_id="patch_fail",
+        )
+    except ValueError as exc:
+        assert "bad training sample" in str(exc)
+    else:
+        raise AssertionError("Expected tokenization failure to propagate")
+
+    assert observed["get_peft_called"] is False
+
+
 def test_create_patch_from_contrast_return_stats_true(monkeypatch):
     from cogmem.patches import create as create_mod
 
@@ -171,6 +290,36 @@ def test_create_patch_from_contrast_return_stats_true(monkeypatch):
     assert observed["show_progress"] is True
     assert observed["log_every_steps"] == 1
     assert dummy_model.base_model.unloaded is True
+
+
+def test_create_patch_from_cluster_tokenizes_before_attaching_lora(monkeypatch):
+    from cogmem.patches import create as create_mod
+
+    observed = {"get_peft_called": False}
+
+    def fail_tokenization(*args, **kwargs):
+        raise ValueError("bad cluster sample")
+
+    def fake_get_peft_model(base_model, config):
+        observed["get_peft_called"] = True
+        return DummyPeftModel()
+
+    monkeypatch.setattr(create_mod, "_tokenize_training_messages", fail_tokenization)
+    monkeypatch.setattr(create_mod, "get_peft_model", fake_get_peft_model)
+
+    try:
+        create_mod.create_patch_from_cluster(
+            base_model=object(),
+            tokenizer=DummyTokenizer(),
+            examples=[{"prompt": "x", "code": "y"}],
+            patch_id="cluster_fail",
+        )
+    except ValueError as exc:
+        assert "bad cluster sample" in str(exc)
+    else:
+        raise AssertionError("Expected cluster tokenization failure to propagate")
+
+    assert observed["get_peft_called"] is False
 
 
 def test_ensure_clean_base_model_rejects_stale_peft_layers():

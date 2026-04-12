@@ -120,6 +120,17 @@ def create_patch_from_contrast(
     """
     _ensure_clean_base_model(base_model)
 
+    from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
+    from datasets import Dataset
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": task_prompt},
+        {"role": "assistant", "content": passed_code},
+    ]
+    tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
+    dataset = Dataset.from_list([tok])
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -132,21 +143,6 @@ def create_patch_from_contrast(
     model = get_peft_model(base_model, lora_config)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
-
-    from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
-    from datasets import Dataset
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": task_prompt},
-        {"role": "assistant", "content": passed_code},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=False
-    )
-    tok = tokenizer(text, truncation=True, max_length=1024, padding=False)
-    tok["labels"] = tok["input_ids"].copy()
-    dataset = Dataset.from_list([tok])
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     try:
@@ -234,6 +230,18 @@ def create_patch_from_cluster(
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
     from datasets import Dataset
 
+    data = []
+    for ex in examples:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": ex["prompt"]},
+            {"role": "assistant", "content": ex["code"]},
+        ]
+        tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
+        data.append(tok)
+
+    dataset = Dataset.from_list(data)
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -246,22 +254,6 @@ def create_patch_from_cluster(
     model = get_peft_model(base_model, lora_config)
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
-
-    data = []
-    for ex in examples:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": ex["prompt"]},
-            {"role": "assistant", "content": ex["code"]},
-        ]
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-        tok = tokenizer(text, truncation=True, max_length=1024, padding=False)
-        tok["labels"] = tok["input_ids"].copy()
-        data.append(tok)
-
-    dataset = Dataset.from_list(data)
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
     try:
@@ -323,6 +315,7 @@ def _train_patch_adapter(
     )
     training_args = TrainingArguments(
         output_dir=output_dir,
+        num_train_epochs=1,
         max_steps=n_steps,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=max(1, gradient_accumulation_steps),
@@ -455,9 +448,58 @@ def _extract_final_loss(log_history: list[dict] | None) -> float | None:
     for entry in reversed(log_history or []):
         if "loss" in entry:
             return float(entry["loss"])
+    for entry in reversed(log_history or []):
         if "train_loss" in entry:
             return float(entry["train_loss"])
     return None
+
+
+def _tokenize_training_messages(tokenizer, messages: list[dict], max_length: int = 1024) -> dict:
+    """Tokenize a training conversation and supervise assistant tokens when possible."""
+    try:
+        tok = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+    except TypeError:
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+        tok = tokenizer(
+            text,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            add_special_tokens=False,
+        )
+        tok["labels"] = tok["input_ids"].copy()
+        return tok
+
+    assistant_mask = tok.get("assistant_masks")
+    if assistant_mask is None:
+        assistant_mask = tok.get("assistant_tokens_mask")
+
+    input_ids = tok["input_ids"]
+    if assistant_mask is None:
+        tok["labels"] = input_ids.copy()
+        return tok
+
+    assistant_tokens = sum(int(v) for v in assistant_mask)
+    if assistant_tokens <= 0:
+        tok["labels"] = input_ids.copy()
+        return tok
+
+    tok["labels"] = [
+        token_id if int(mask_value) else -100
+        for token_id, mask_value in zip(input_ids, assistant_mask)
+    ]
+    return tok
 
 
 def _extract_lora_weights(peft_model) -> dict:
