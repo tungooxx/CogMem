@@ -102,7 +102,7 @@ def create_patch_from_contrast(
         num_train_epochs=n_steps,  # n_steps on 1 example = n_steps epochs
         per_device_train_batch_size=1,
         learning_rate=lr,
-        lr_scheduler_type="constant",  # keep full LR for all steps, no decay
+        lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
         logging_steps=10,
         save_strategy="no",
         report_to="none",
@@ -236,7 +236,7 @@ def create_patch_from_cluster(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=min(4, len(data)),
         learning_rate=lr,
-        lr_scheduler_type="constant",  # keep full LR for all steps, no decay
+        lr_scheduler_type="cosine",  # smooth decay: high LR early, gentle finish
         logging_steps=10,
         save_strategy="no",
         report_to="none",
