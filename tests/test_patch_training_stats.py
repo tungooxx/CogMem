@@ -4,7 +4,23 @@ from cogmem.patches.patch import CognitivePatch
 
 
 class DummyTokenizer:
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        truncation=False,
+        max_length=None,
+        padding=False,
+        return_dict=False,
+        return_assistant_tokens_mask=False,
+        **kwargs,
+    ):
+        if tokenize:
+            result = {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+            if return_assistant_tokens_mask:
+                result["assistant_masks"] = [0, 1, 1]
+            return result
         return "chat text"
 
     def __call__(self, text, truncation=True, max_length=1024, padding=False):
@@ -64,9 +80,46 @@ def test_extract_loss_history_monotonic_steps():
 def test_extract_final_loss_prefers_last_loss_then_train_loss():
     from cogmem.patches.create import _extract_final_loss
 
-    assert _extract_final_loss([{"train_loss": 9.0}, {"loss": 2.5}]) == 2.5
+    assert _extract_final_loss([{"loss": 2.5}, {"train_loss": 9.0}]) == 2.5
     assert _extract_final_loss([{"train_loss": 1.25}]) == 1.25
     assert _extract_final_loss([]) is None
+
+
+def test_tokenize_training_messages_masks_non_assistant_tokens():
+    from cogmem.patches.create import _tokenize_training_messages
+
+    tok = _tokenize_training_messages(
+        DummyTokenizer(),
+        [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+        max_length=1024,
+    )
+
+    assert tok["labels"] == [-100, 2, 3]
+
+
+def test_tokenize_training_messages_raises_when_assistant_tokens_missing():
+    from cogmem.patches.create import _tokenize_training_messages
+
+    class ZeroAssistantTokenizer(DummyTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            if kwargs.get("tokenize"):
+                return {
+                    "input_ids": [1, 2, 3],
+                    "attention_mask": [1, 1, 1],
+                    "assistant_masks": [0, 0, 0],
+                }
+            return super().apply_chat_template(*args, **kwargs)
+
+    try:
+        _tokenize_training_messages(
+            ZeroAssistantTokenizer(),
+            [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+            max_length=1024,
+        )
+    except ValueError as exc:
+        assert "no assistant tokens" in str(exc)
+    else:
+        raise AssertionError("Expected missing assistant tokens to raise ValueError")
 
 
 def test_patch_training_callback_collects_logs(capsys):

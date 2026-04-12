@@ -141,11 +141,7 @@ def create_patch_from_contrast(
         {"role": "user", "content": task_prompt},
         {"role": "assistant", "content": passed_code},
     ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=False
-    )
-    tok = tokenizer(text, truncation=True, max_length=1024, padding=False)
-    tok["labels"] = tok["input_ids"].copy()
+    tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
     dataset = Dataset.from_list([tok])
 
     tmp_dir = tempfile.mkdtemp(prefix=f"cogmem_patch_{patch_id}_")
@@ -254,11 +250,7 @@ def create_patch_from_cluster(
             {"role": "user", "content": ex["prompt"]},
             {"role": "assistant", "content": ex["code"]},
         ]
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-        tok = tokenizer(text, truncation=True, max_length=1024, padding=False)
-        tok["labels"] = tok["input_ids"].copy()
+        tok = _tokenize_training_messages(tokenizer, messages, max_length=1024)
         data.append(tok)
 
     dataset = Dataset.from_list(data)
@@ -323,6 +315,7 @@ def _train_patch_adapter(
     )
     training_args = TrainingArguments(
         output_dir=output_dir,
+        num_train_epochs=1,
         max_steps=n_steps,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=max(1, gradient_accumulation_steps),
@@ -455,9 +448,54 @@ def _extract_final_loss(log_history: list[dict] | None) -> float | None:
     for entry in reversed(log_history or []):
         if "loss" in entry:
             return float(entry["loss"])
+    for entry in reversed(log_history or []):
         if "train_loss" in entry:
             return float(entry["train_loss"])
     return None
+
+
+def _tokenize_training_messages(tokenizer, messages: list[dict], max_length: int = 1024) -> dict:
+    """Tokenize a training conversation and supervise assistant tokens when possible."""
+    try:
+        tok = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+    except TypeError:
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+        tok = tokenizer(text, truncation=True, max_length=max_length, padding=False)
+        tok["labels"] = tok["input_ids"].copy()
+        return tok
+
+    assistant_mask = tok.get("assistant_masks")
+    if assistant_mask is None:
+        assistant_mask = tok.get("assistant_tokens_mask")
+
+    input_ids = tok["input_ids"]
+    if assistant_mask is None:
+        tok["labels"] = input_ids.copy()
+        return tok
+
+    assistant_tokens = sum(int(v) for v in assistant_mask)
+    if assistant_tokens <= 0:
+        raise ValueError(
+            "Training sample has no assistant tokens after tokenization/truncation; "
+            "increase max_length or shorten the prompt/code."
+        )
+
+    tok["labels"] = [
+        token_id if int(mask_value) else -100
+        for token_id, mask_value in zip(input_ids, assistant_mask)
+    ]
+    return tok
 
 
 def _extract_lora_weights(peft_model) -> dict:
