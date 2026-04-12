@@ -170,8 +170,13 @@ def _get_logical_projection_shape(module: nn.Module) -> tuple[int, int] | None:
     if out_features is not None and in_features is not None:
         return int(out_features), int(in_features)
 
+    module_name = module.__class__.__name__
     weight = getattr(module, "weight", None)
-    if weight is not None and getattr(weight, "dim", lambda: 0)() == 2:
+    if (
+        weight is not None
+        and getattr(weight, "dim", lambda: 0)() == 2
+        and (isinstance(module, nn.Linear) or module_name in {"Linear", "NonDynamicallyQuantizableLinear"})
+    ):
         return tuple(int(v) for v in weight.shape)
 
     return None

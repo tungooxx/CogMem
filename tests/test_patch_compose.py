@@ -40,6 +40,15 @@ def test_get_logical_projection_shape_prefers_feature_dims_over_packed_weight():
     assert _get_logical_projection_shape(module) == (6, 4)
 
 
+def test_get_logical_projection_shape_returns_none_for_unknown_packed_module():
+    class UnknownPackedProj(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(24, 1))
+
+    assert _get_logical_projection_shape(UnknownPackedProj()) is None
+
+
 def test_compose_patches_uses_logical_projection_shape_for_packed_weights():
     model = FakeModel()
     a = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
@@ -55,12 +64,13 @@ def test_compose_patches_uses_logical_projection_shape_for_packed_weights():
     )
 
     hooks = compose_patches(model, [patch], scaling_factor=1.0)
-    assert len(hooks) == 1
+    try:
+        assert len(hooks) == 1
 
-    x = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
-    out = model.model.layers[0].self_attn.q_proj(x)
-    expected = torch.tensor([[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]])
-    assert torch.allclose(out, expected)
-
-    for hook in hooks:
-        hook.remove()
+        x = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        out = model.model.layers[0].self_attn.q_proj(x)
+        expected = torch.tensor([[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]])
+        assert torch.allclose(out, expected)
+    finally:
+        for hook in hooks:
+            hook.remove()
