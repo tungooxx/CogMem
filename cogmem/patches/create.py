@@ -19,6 +19,7 @@ from pathlib import Path
 
 import torch
 from peft import LoraConfig, get_peft_model
+from peft.tuners.tuners_utils import BaseTunerLayer
 from transformers import (
     DataCollatorForSeq2Seq,
     Trainer,
@@ -117,6 +118,8 @@ def create_patch_from_contrast(
     Returns:
         CognitivePatch with tiny LoRA weights, optionally with training stats.
     """
+    _ensure_clean_base_model(base_model)
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=rank * 2,
@@ -226,6 +229,7 @@ def create_patch_from_cluster(
     """
     if not examples:
         raise ValueError("Cannot create cluster patch from empty examples list")
+    _ensure_clean_base_model(base_model)
 
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
     from datasets import Dataset
@@ -291,6 +295,16 @@ def create_patch_from_cluster(
 # Helpers
 # -------------------------------------------------------------------------
 
+def _ensure_clean_base_model(base_model) -> None:
+    """Fail fast if a prior PEFT run left LoRA layers attached to the base model."""
+    if not hasattr(base_model, "modules"):
+        return
+    if any(isinstance(module, BaseTunerLayer) for module in base_model.modules()):
+        raise RuntimeError(
+            "base_model already contains PEFT layers from a previous patch training run. "
+            "Reload the base model and rerun patch creation."
+        )
+
 def _train_patch_adapter(
     model,
     tokenizer,
@@ -351,17 +365,45 @@ def _train_patch_adapter(
 
 def _cleanup_patch_training(model, tmp_dir: str) -> None:
     """Remove adapter state and temporary files."""
-    try:
-        model.disable_adapter_layers()
-        model.delete_adapter("default")
-    except Exception as e:
-        print(f"Warning: adapter cleanup failed: {type(e).__name__}: {e}")
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
+    can_unload = hasattr(model, "base_model") and hasattr(model.base_model, "unload")
+    can_disable = hasattr(model, "disable_adapter_layers")
+    can_delete = hasattr(model, "delete_adapter")
+    cleanup_errors: list[tuple[str, Exception]] = []
 
-    if Path(tmp_dir).exists():
-        shutil.rmtree(tmp_dir)
+    def run_disable_and_delete() -> None:
+        if can_disable:
+            try:
+                model.disable_adapter_layers()
+            except Exception as e:
+                cleanup_errors.append(("disable_adapter_layers", e))
+        if can_delete:
+            try:
+                model.delete_adapter("default")
+            except Exception as e:
+                cleanup_errors.append(("delete_adapter", e))
+
+    try:
+        if can_unload:
+            try:
+                model.base_model.unload()
+            except Exception as e:
+                cleanup_errors.append(("base_model.unload", e))
+                run_disable_and_delete()
+        else:
+            run_disable_and_delete()
+    finally:
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if Path(tmp_dir).exists():
+            shutil.rmtree(tmp_dir)
+
+    if cleanup_errors:
+        details = ", ".join(
+            f"{name}: {type(err).__name__}: {err}" for name, err in cleanup_errors
+        )
+        raise RuntimeError(f"Patch cleanup failed ({details})") from cleanup_errors[0][1]
 
 
 def _normalize_loss_entry(
