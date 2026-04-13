@@ -2,7 +2,7 @@
 
 Three modes:
 - Cold: base model only (floor)
-- Patched: base + dynamic patches per task (full system)
+- Patched: base + dynamic cluster memories per task (full system)
 - Best-of-N: patched + N candidates per task (ceiling)
 """
 
@@ -11,6 +11,7 @@ import torch
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
 from cogmem.patches.compose import PatchedModel
+from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
 from cogmem.patches.wake import generate_with_model
 
 
@@ -50,21 +51,17 @@ def evaluate_patched(
     base_model,
     tokenizer,
     tasks: list[dict],
-    patch_bank,
+    memory_bank: ClusterMemoryBank,
     embedder,
     eval_timeout: int = 30,
 ) -> float:
-    """Base model + dynamically composed patches per task."""
+    """Base model + dynamically composed distilled patches per task."""
     passed = 0
 
     for i, task in enumerate(tasks):
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
-
-        # Get patches for this task
-        active_patches = patch_bank.get_active_patches(task_embedding, top_k=5)
-        for p in active_patches:
-            patch_bank.load_weights(p)
+        active_patches = []
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -72,7 +69,8 @@ def evaluate_patched(
         ]
 
         try:
-            with PatchedModel(base_model, active_patches):
+            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+            with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 response = generate_with_model(base_model, tokenizer, messages, temperature=0)
             code = extract_code(response)
             result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
@@ -96,7 +94,7 @@ def evaluate_best_of_n(
     base_model,
     tokenizer,
     tasks: list[dict],
-    patch_bank,
+    memory_bank: ClusterMemoryBank,
     embedder,
     n: int = 8,
     temperature: float = 0.8,
@@ -108,10 +106,7 @@ def evaluate_best_of_n(
     for i, task in enumerate(tasks):
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
-
-        active_patches = patch_bank.get_active_patches(task_embedding, top_k=5)
-        for p in active_patches:
-            patch_bank.load_weights(p)
+        active_patches = []
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -120,7 +115,8 @@ def evaluate_best_of_n(
 
         task_passed = False
         try:
-            with PatchedModel(base_model, active_patches):
+            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+            with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 for _ in range(n):
                     try:
                         response = generate_with_model(

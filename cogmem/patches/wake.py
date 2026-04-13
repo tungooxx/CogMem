@@ -1,24 +1,24 @@
 """Wake mode — experience loop for cognitive patch creation.
 
 Process tasks sequentially:
-1. RETRIEVE relevant patches from bank
-2. COMPOSE patches onto base model
+1. RETRIEVE relevant cluster memories
+2. LOAD distilled patch artifacts and compose them onto the base model
 3. GENERATE N candidates with patched model
 4. TEST each candidate
-5. LEARN: create new patch from pass/fail contrast
-6. UPDATE Q-values of active patches
+5. LEARN: record a new episode from pass/fail contrast
+6. UPDATE memory-object usage and utility signals
 """
 
 import time
+from concurrent.futures import Future
 from difflib import SequenceMatcher
 
 import torch
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
-from cogmem.patches.bank import PatchBank
 from cogmem.patches.compose import PatchedModel
-from cogmem.patches.create import create_patch_from_contrast
+from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
 
 
 def generate_with_model(model, tokenizer, messages, temperature=0.8, max_tokens=2048):
@@ -66,12 +66,14 @@ def run_wake_cycle(
     tasks: list[dict],
     base_model,
     tokenizer,
-    patch_bank: PatchBank,
+    memory_bank: ClusterMemoryBank,
     embedder,
     n_candidates: int = 8,
     temperature: float = 0.8,
     eval_timeout: int = 30,
     save_every: int = 50,
+    rebuild_every: int = 10,
+    async_build: bool = False,
 ) -> dict:
     """Process tasks sequentially, creating patches from experience.
 
@@ -79,34 +81,48 @@ def run_wake_cycle(
         tasks: List of BigCodeBench task dicts.
         base_model: Frozen 4-bit base model on GPU.
         tokenizer: Tokenizer.
-        patch_bank: PatchBank to read from and write to.
+        memory_bank: ClusterMemoryBank to read from and write to.
         embedder: SentenceTransformer for task embeddings.
         n_candidates: Candidates per task for best-of-N.
         temperature: Sampling temperature.
         eval_timeout: Test timeout in seconds.
         save_every: Save bank every N tasks.
+        rebuild_every: Rebuild cluster memories every N newly recorded episodes
+            when value > 0. Units are episodes/tasks encountered in this wake loop.
+        async_build: If True, schedule expensive ``build_memories`` refreshes on
+            a background worker so the wake loop keeps moving. When False, rebuilds
+            happen synchronously and can noticeably slow the loop.
 
     Returns:
         Stats dict.
     """
     total = len(tasks)
-    patches_created = 0
+    episodes_created = 0
     tasks_passed = 0
     start_time = time.time()
+    pending_build: Future | None = None
+
+    def maybe_raise_pending_build() -> None:
+        nonlocal pending_build
+        if pending_build is not None and pending_build.done():
+            pending_build.result()
+            pending_build = None
 
     for i, task in enumerate(tasks):
+        maybe_raise_pending_build()
         task_id = task["task_id"]
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
 
         # 1. Embed task
         task_embedding = embedder.encode(prompt).tolist()
 
-        # 2. Get relevant patches
-        active_patches = patch_bank.get_active_patches(task_embedding, top_k=5)
-
-        # Load weights for active patches (lazy loading)
-        for p in active_patches:
-            patch_bank.load_weights(p)
+        # 2. Get relevant memories and their distilled patches
+        active_memories, active_patches = memory_bank.get_active_patches(
+            task_embedding,
+            prompt,
+            top_k=5,
+            return_memories=True,
+        )
 
         # 3. Generate N candidates with patched model
         messages = [
@@ -116,7 +132,7 @@ def run_wake_cycle(
 
         candidates = []
         try:
-            with PatchedModel(base_model, active_patches):
+            with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 for _ in range(n_candidates):
                     try:
                         response = generate_with_model(
@@ -144,53 +160,70 @@ def run_wake_cycle(
         if task_succeeded:
             tasks_passed += 1
 
-        # 5. Create patch from contrast
+        # 5. Record episode from contrast
         if passes and fails:
-            best_pair, _ = find_best_contrast_pair(passes, fails)
+            best_pair, best_sim = find_best_contrast_pair(passes, fails)
             if best_pair:
-                new_patch = create_patch_from_contrast(
-                    base_model, tokenizer,
-                    prompt,
-                    best_pair["fail"]["code"],
-                    best_pair["pass"]["code"],
-                    patch_id=f"patch_{task_id.replace('/', '_')}_{int(time.time())}",
+                memory_bank.record_episode(
+                    task_id=task_id,
+                    prompt=prompt,
+                    task_embedding=task_embedding,
+                    failed_code=best_pair["fail"]["code"],
+                    passed_code=best_pair["pass"]["code"],
+                    pass_fail_similarity=best_sim,
                 )
-                new_patch.embedding = task_embedding
-                new_patch.source_task_id = task_id
-                patch_bank.add(new_patch)
-                patches_created += 1
+                episodes_created += 1
 
-        # 6. Update Q-values of active patches
-        for patch in active_patches:
-            patch_bank.update_q(patch.patch_id, task_succeeded)
+                if rebuild_every > 0 and episodes_created % rebuild_every == 0:
+                    if async_build:
+                        if pending_build is None:
+                            pending_build = memory_bank.schedule_build_memories(
+                                base_model,
+                                tokenizer,
+                            )
+                    else:
+                        memory_bank.build_memories(base_model, tokenizer)
+
+        # 6. Update utility signals of active memories
+        for memory in active_memories:
+            memory_bank.update_memory_utility(
+                memory.memory_id,
+                task_succeeded,
+                persist=False,
+            )
 
         # 7. Progress
         if (i + 1) % 10 == 0 or i < 5:
             elapsed = time.time() - start_time
             rate = (i + 1) / elapsed * 3600 if elapsed > 0 else 0
             eta = (total - i - 1) / (rate / 60) if rate > 0 else 0
-            stats = patch_bank.stats()
+            stats = memory_bank.stats()
             n_pass = len(passes)
             n_fail = len(fails)
             print(
                 f"  [{i+1}/{total}] {task_id}: "
                 f"{n_pass}P/{n_fail}F | "
-                f"patches={stats.get('total', 0)} | "
+                f"memories={stats.get('memories', 0)} | "
                 f"pass_rate={tasks_passed}/{i+1} ({tasks_passed/(i+1):.1%}) | "
-                f"active={len(active_patches)} | "
+                f"active={len(active_memories)} | "
                 f"ETA={eta:.0f}m"
             )
 
         # Save periodically
         if (i + 1) % save_every == 0:
-            patch_bank.save()
+            memory_bank.save()
 
-    patch_bank.save()
+    if pending_build is not None:
+        pending_build.result()
+        pending_build = None
+    else:
+        memory_bank.build_memories(base_model, tokenizer)
+    memory_bank.save()
 
     return {
         "total_tasks": total,
         "tasks_passed": tasks_passed,
         "pass_rate": tasks_passed / max(total, 1),
-        "patches_created": patches_created,
-        "total_patches": len(patch_bank.patches),
+        "episodes_created": episodes_created,
+        "total_memories": len(memory_bank.memories),
     }
