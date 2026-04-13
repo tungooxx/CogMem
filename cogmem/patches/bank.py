@@ -25,9 +25,13 @@ class PatchBank:
 
     def add(self, patch: CognitivePatch) -> None:
         """Add a patch and save it to disk."""
-        idx = len(self.patches)
-        self.patches.append(patch)
-        self._index[patch.patch_id] = idx
+        idx = self._index.get(patch.patch_id)
+        if idx is None:
+            idx = len(self.patches)
+            self.patches.append(patch)
+            self._index[patch.patch_id] = idx
+        else:
+            self.patches[idx] = patch
         self._embeddings = None  # invalidate cache
 
         # Save immediately
@@ -153,6 +157,13 @@ class PatchBank:
         if not patch.lora_weights:
             loaded = CognitivePatch.load(self.save_dir, patch.patch_id, load_weights=True)
             patch.lora_weights = loaded.lora_weights
+
+    def get_patch(self, patch_id: str) -> CognitivePatch | None:
+        """Return an in-memory patch record by id."""
+        idx = self._index.get(patch_id)
+        if idx is None:
+            return None
+        return self.patches[idx]
 
     def stats(self) -> dict:
         """Get patch bank statistics."""

@@ -1,9 +1,4 @@
-"""Full wake/sleep cycle runner for cognitive patches.
-
-Cycle 0: WAKE (empty bank) → create initial patches → SLEEP (light prune)
-Cycle 1: WAKE (with patches) → model thinks differently → SLEEP (merge+prune)
-Cycle N: richer bank → better per-task adaptation → consolidation
-"""
+"""Full wake/build cycle runner for episode-first cluster memories."""
 
 import json
 import time
@@ -13,16 +8,15 @@ import torch
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from cogmem.patches.bank import PatchBank
 from cogmem.patches.evaluate import evaluate_cold, evaluate_patched
-from cogmem.patches.sleep import run_sleep_cycle
+from cogmem.patches.memory_bank import ClusterMemoryBank
 from cogmem.patches.wake import run_wake_cycle
 
 
 def run_cogmem_cycle(
     tasks_path: str,
     base_model_name: str = "Qwen/Qwen2.5-3B-Instruct",
-    patch_bank_dir: str = "results/patches",
+    patch_bank_dir: str = "results/cluster_memories",
     n_cycles: int = 5,
     n_candidates: int = 8,
     eval_size: int = 200,
@@ -32,7 +26,7 @@ def run_cogmem_cycle(
     Args:
         tasks_path: Path to BigCodeBench tasks JSONL.
         base_model_name: HuggingFace model name.
-        patch_bank_dir: Directory for patch storage.
+        patch_bank_dir: Directory for cluster-memory storage.
         n_cycles: Number of wake/sleep cycles.
         n_candidates: Candidates per task during wake.
         eval_size: Number of tasks for evaluation (subset for speed).
@@ -67,8 +61,8 @@ def run_cogmem_cycle(
     print("Loading embedder...")
     embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
-    # Initialize or load patch bank
-    patch_bank = PatchBank(patch_bank_dir)
+    # Initialize or load cluster memory bank
+    patch_bank = ClusterMemoryBank(patch_bank_dir)
     if Path(patch_bank_dir).exists():
         patch_bank.load()
 
@@ -87,11 +81,7 @@ def run_cogmem_cycle(
         )
         print(f"Wake results: {wake_stats['tasks_passed']}/{wake_stats['total_tasks']} "
               f"({wake_stats['pass_rate']:.1%}), "
-              f"{wake_stats['patches_created']} new patches")
-
-        # ═══ SLEEP ═══
-        print(f"\n--- SLEEP (cycle {cycle}) ---")
-        sleep_stats = run_sleep_cycle(patch_bank)
+              f"{wake_stats['episodes_created']} new episodes")
 
         # ═══ EVALUATE ═══
         print(f"\n--- EVALUATE (cycle {cycle}) ---")
@@ -109,7 +99,7 @@ def run_cogmem_cycle(
             "cold_pass_rate": cold_rate,
             "patched_pass_rate": patched_rate,
             "improvement": patched_rate - cold_rate,
-            "total_patches": len(patch_bank.patches),
+            "total_memories": len(patch_bank.memories),
             "bank_stats": patch_bank.stats(),
             "wake_stats": wake_stats,
         }
@@ -119,7 +109,8 @@ def run_cogmem_cycle(
         print(f"  Cold (no patches): {cold_rate:.1%}")
         print(f"  Patched:           {patched_rate:.1%}")
         print(f"  Improvement:       {patched_rate - cold_rate:+.1%}")
-        print(f"  Patches in bank:   {len(patch_bank.patches)}")
+        print(f"  Episodes stored:   {len(patch_bank.episodes)}")
+        print(f"  Memories in bank:  {len(patch_bank.memories)}")
 
         # Save learning curve
         results_dir = Path(patch_bank_dir) / "results"
@@ -131,7 +122,7 @@ def run_cogmem_cycle(
     print(f"\n{'=' * 60}")
     print("COGMEM CYCLES COMPLETE")
     print(f"{'=' * 60}")
-    print(f"{'Cycle':<8} {'Cold':>8} {'Patched':>10} {'Delta':>8} {'Patches':>10}")
+    print(f"{'Cycle':<8} {'Cold':>8} {'Patched':>10} {'Delta':>8} {'Memories':>10}")
     print("-" * 46)
     for p in learning_curve:
         print(
@@ -139,7 +130,7 @@ def run_cogmem_cycle(
             f"{p['cold_pass_rate']:>7.1%} "
             f"{p['patched_pass_rate']:>9.1%} "
             f"{p['improvement']:>+7.1%} "
-            f"{p['total_patches']:>10}"
+            f"{p['total_memories']:>10}"
         )
 
     return learning_curve
