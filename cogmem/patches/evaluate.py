@@ -62,8 +62,7 @@ def evaluate_patched(
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
 
-        active_memories = memory_bank.get_active_memories(task_embedding, prompt, top_k=5)
-        active_patches = memory_bank.load_patches_for_memories(active_memories)
+        active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -108,8 +107,7 @@ def evaluate_best_of_n(
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
 
-        active_memories = memory_bank.get_active_memories(task_embedding, prompt, top_k=5)
-        active_patches = memory_bank.load_patches_for_memories(active_memories)
+        active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

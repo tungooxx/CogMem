@@ -62,9 +62,9 @@ def run_cogmem_cycle(
     embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
     # Initialize or load cluster memory bank
-    patch_bank = ClusterMemoryBank(patch_bank_dir)
+    memory_bank = ClusterMemoryBank(patch_bank_dir)
     if Path(patch_bank_dir).exists():
-        patch_bank.load()
+        memory_bank.load()
 
     learning_curve = []
 
@@ -76,7 +76,7 @@ def run_cogmem_cycle(
         # ═══ WAKE ═══
         print(f"\n--- WAKE (cycle {cycle}) ---")
         wake_stats = run_wake_cycle(
-            tasks, base_model, tokenizer, patch_bank, embedder,
+            tasks, base_model, tokenizer, memory_bank, embedder,
             n_candidates=n_candidates,
         )
         print(f"Wake results: {wake_stats['tasks_passed']}/{wake_stats['total_tasks']} "
@@ -91,7 +91,7 @@ def run_cogmem_cycle(
             base_model, tokenizer, eval_tasks,
         )
         patched_rate = evaluate_patched(
-            base_model, tokenizer, eval_tasks, patch_bank, embedder,
+            base_model, tokenizer, eval_tasks, memory_bank, embedder,
         )
 
         point = {
@@ -99,8 +99,8 @@ def run_cogmem_cycle(
             "cold_pass_rate": cold_rate,
             "patched_pass_rate": patched_rate,
             "improvement": patched_rate - cold_rate,
-            "total_memories": len(patch_bank.memories),
-            "bank_stats": patch_bank.stats(),
+            "total_memories": len(memory_bank.memories),
+            "bank_stats": memory_bank.stats(),
             "wake_stats": wake_stats,
         }
         learning_curve.append(point)
@@ -109,8 +109,8 @@ def run_cogmem_cycle(
         print(f"  Cold (no patches): {cold_rate:.1%}")
         print(f"  Patched:           {patched_rate:.1%}")
         print(f"  Improvement:       {patched_rate - cold_rate:+.1%}")
-        print(f"  Episodes stored:   {len(patch_bank.episodes)}")
-        print(f"  Memories in bank:  {len(patch_bank.memories)}")
+        print(f"  Episodes stored:   {len(memory_bank.episodes)}")
+        print(f"  Memories in bank:  {len(memory_bank.memories)}")
 
         # Save learning curve
         results_dir = Path(patch_bank_dir) / "results"

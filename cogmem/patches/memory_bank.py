@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -105,6 +105,8 @@ class ClusterMemoryBank:
         self._episode_index: dict[str, int] = {}
         self._memory_index: dict[str, int] = {}
         self._patch_bank = PatchBank(str(self.save_dir / "patch_artifacts"))
+        self._build_executor: ThreadPoolExecutor | None = None
+        self._build_future: Future | None = None
 
     def load(self) -> None:
         self._patch_bank.load()
@@ -219,6 +221,7 @@ class ClusterMemoryBank:
             )
             memories.append(memory)
 
+        memories = self._merge_memories(memories)
         _apply_recency_scores(memories)
         _apply_redundancy_penalties(memories)
         _recompute_q_values(memories)
@@ -258,9 +261,13 @@ class ClusterMemoryBank:
         query_embedding: list[float],
         task_prompt: str,
         top_k: int = 5,
-    ) -> list[CognitivePatch]:
+        return_memories: bool = False,
+    ) -> list[CognitivePatch] | tuple[list[ClusterMemory], list[CognitivePatch]]:
         memories = self.get_active_memories(query_embedding, task_prompt, top_k=top_k)
-        return self.load_patches_for_memories(memories)
+        patches = self.load_patches_for_memories(memories)
+        if return_memories:
+            return memories, patches
+        return patches
 
     def load_patches_for_memories(
         self,
@@ -286,6 +293,7 @@ class ClusterMemoryBank:
         memory_id: str,
         task_succeeded: bool,
         cold_succeeded: bool | None = None,
+        persist: bool = True,
     ) -> None:
         idx = self._memory_index.get(memory_id)
         if idx is None:
@@ -302,7 +310,33 @@ class ClusterMemoryBank:
 
         _apply_recency_scores(self.memories)
         _recompute_q_values(self.memories)
-        self.save()
+        if persist:
+            self.save()
+
+    def schedule_build_memories(
+        self,
+        base_model,
+        tokenizer,
+        **build_kwargs,
+    ) -> Future:
+        """Schedule ``build_memories`` on a background worker."""
+        if self._build_executor is None:
+            self._build_executor = ThreadPoolExecutor(max_workers=1)
+        self._build_future = self._build_executor.submit(
+            self.build_memories,
+            base_model,
+            tokenizer,
+            **build_kwargs,
+        )
+        return self._build_future
+
+    def flush_pending_build(self) -> None:
+        """Wait for and surface any pending asynchronous build result."""
+        if self._build_future is None:
+            return
+        future = self._build_future
+        self._build_future = None
+        future.result()
 
     def stats(self) -> dict[str, Any]:
         family_counts: dict[str, int] = {}
@@ -334,6 +368,38 @@ class ClusterMemoryBank:
         with open(path, encoding="utf-8") as handle:
             raw = json.load(handle)
         return [record_type.from_dict(item) for item in raw]
+
+    def _merge_memories(self, new_memories: list[ClusterMemory]) -> list[ClusterMemory]:
+        """Merge freshly built memories with historical ones instead of replacing them."""
+        existing_by_id = {memory.memory_id: memory for memory in self.memories}
+        existing_by_members = {
+            frozenset(memory.member_episode_ids): memory
+            for memory in self.memories
+        }
+        episode_ids = {episode.episode_id for episode in self.episodes}
+        merged: list[ClusterMemory] = []
+        retained_ids: set[str] = set()
+
+        for memory in new_memories:
+            existing = existing_by_id.get(memory.memory_id)
+            if existing is None:
+                existing = existing_by_members.get(frozenset(memory.member_episode_ids))
+            if existing is not None:
+                memory.q_value = existing.q_value
+                memory.reuse_count = existing.reuse_count
+                memory.last_used_at = existing.last_used_at
+                memory.utility_regression = existing.utility_regression
+                memory.created_at = existing.created_at
+            merged.append(memory)
+            retained_ids.add(memory.memory_id)
+
+        for existing in self.memories:
+            if existing.memory_id in retained_ids:
+                continue
+            if set(existing.member_episode_ids).issubset(episode_ids):
+                merged.append(existing)
+
+        return merged
 
 
 def derive_family_label(prompt: str) -> str:
@@ -388,6 +454,12 @@ def _cluster_episodes(
     similarity_threshold: float,
     min_support: int,
 ) -> list[list[EpisodeRecord]]:
+    """Cluster episodes with single-link connected components inside each family.
+
+    This is intentionally transitive: if A~B and B~C clear ``similarity_threshold``,
+    all three can land in the same cluster even when A and C do not. ``min_support``
+    is applied to the final connected component size, not to all-pairs cliques.
+    """
     by_family: dict[str, list[EpisodeRecord]] = {}
     for episode in episodes:
         by_family.setdefault(episode.family_label, []).append(episode)
@@ -446,6 +518,15 @@ def _pool_hidden_states(
     layer_window: list[int],
     token_window: int,
 ) -> np.ndarray:
+    """Pool hidden states from standard Hugging Face decoder models.
+
+    Assumes ``output_hidden_states=True`` returns ``hidden_states`` where
+    ``hidden_states[0]`` is the embedding output and ``hidden_states[1..]`` are
+    transformer layer outputs, which is why this code indexes
+    ``hidden_states[layer_idx + 1]``. This also assumes ``model.config`` exposes
+    ``num_hidden_layers``; non-standard models may require different indexing or
+    an explicit layer count.
+    """
     encoded = tokenizer(
         text,
         return_tensors="pt",

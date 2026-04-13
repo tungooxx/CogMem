@@ -6,7 +6,6 @@ import torch
 from cogmem.patches.memory_bank import (
     ClusterMemory,
     ClusterMemoryBank,
-    EpisodeRecord,
     _apply_redundancy_penalties,
     compute_top_contrast_directions,
 )
@@ -88,7 +87,8 @@ def test_active_patches_skip_non_retrievable_memories(tmp_path):
             retrievable=False,
         )
     ]
-    bank._memory_index = {"memory_a": 0}
+    bank.save()
+    bank.load()
 
     active = bank.get_active_patches([0.1, 0.2], "plot a histogram", top_k=1)
 
@@ -134,7 +134,8 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
             q_value=0.90,
         ),
     ]
-    bank._memory_index = {memory.memory_id: idx for idx, memory in enumerate(bank.memories)}
+    bank.save()
+    bank.load()
 
     selected = bank.get_active_memories([1.0, 0.0], "plot a dataframe histogram", top_k=1)
 

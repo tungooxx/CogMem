@@ -5,7 +5,7 @@ Patches compose dynamically per-task, so the model thinks
 differently based on accumulated experience.
 """
 
-from cogmem.patches.bank import PatchBank
 from cogmem.patches.memory_bank import ClusterMemoryBank
+from cogmem.patches.bank import PatchBank
 
-__all__ = ["PatchBank", "ClusterMemoryBank"]
+__all__ = ["ClusterMemoryBank", "PatchBank"]

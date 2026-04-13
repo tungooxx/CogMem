@@ -10,6 +10,7 @@ Process tasks sequentially:
 """
 
 import time
+from concurrent.futures import Future
 from difflib import SequenceMatcher
 
 import torch
@@ -72,6 +73,7 @@ def run_wake_cycle(
     eval_timeout: int = 30,
     save_every: int = 50,
     rebuild_every: int = 10,
+    async_build: bool = False,
 ) -> dict:
     """Process tasks sequentially, creating patches from experience.
 
@@ -85,6 +87,11 @@ def run_wake_cycle(
         temperature: Sampling temperature.
         eval_timeout: Test timeout in seconds.
         save_every: Save bank every N tasks.
+        rebuild_every: Rebuild cluster memories every N newly recorded episodes
+            when value > 0. Units are episodes/tasks encountered in this wake loop.
+        async_build: If True, schedule expensive ``build_memories`` refreshes on
+            a background worker so the wake loop keeps moving. When False, rebuilds
+            happen synchronously and can noticeably slow the loop.
 
     Returns:
         Stats dict.
@@ -93,8 +100,16 @@ def run_wake_cycle(
     episodes_created = 0
     tasks_passed = 0
     start_time = time.time()
+    pending_build: Future | None = None
+
+    def maybe_raise_pending_build() -> None:
+        nonlocal pending_build
+        if pending_build is not None and pending_build.done():
+            pending_build.result()
+            pending_build = None
 
     for i, task in enumerate(tasks):
+        maybe_raise_pending_build()
         task_id = task["task_id"]
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
 
@@ -102,8 +117,12 @@ def run_wake_cycle(
         task_embedding = embedder.encode(prompt).tolist()
 
         # 2. Get relevant memories and their distilled patches
-        active_memories = memory_bank.get_active_memories(task_embedding, prompt, top_k=5)
-        active_patches = memory_bank.load_patches_for_memories(active_memories)
+        active_memories, active_patches = memory_bank.get_active_patches(
+            task_embedding,
+            prompt,
+            top_k=5,
+            return_memories=True,
+        )
 
         # 3. Generate N candidates with patched model
         messages = [
@@ -156,11 +175,22 @@ def run_wake_cycle(
                 episodes_created += 1
 
                 if rebuild_every > 0 and episodes_created % rebuild_every == 0:
-                    memory_bank.build_memories(base_model, tokenizer)
+                    if async_build:
+                        if pending_build is None:
+                            pending_build = memory_bank.schedule_build_memories(
+                                base_model,
+                                tokenizer,
+                            )
+                    else:
+                        memory_bank.build_memories(base_model, tokenizer)
 
         # 6. Update utility signals of active memories
         for memory in active_memories:
-            memory_bank.update_memory_utility(memory.memory_id, task_succeeded)
+            memory_bank.update_memory_utility(
+                memory.memory_id,
+                task_succeeded,
+                persist=False,
+            )
 
         # 7. Progress
         if (i + 1) % 10 == 0 or i < 5:
@@ -183,7 +213,11 @@ def run_wake_cycle(
         if (i + 1) % save_every == 0:
             memory_bank.save()
 
-    memory_bank.build_memories(base_model, tokenizer)
+    if pending_build is not None:
+        pending_build.result()
+        pending_build = None
+    else:
+        memory_bank.build_memories(base_model, tokenizer)
     memory_bank.save()
 
     return {
