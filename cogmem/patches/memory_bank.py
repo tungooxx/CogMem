@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -107,19 +108,22 @@ class ClusterMemoryBank:
         self._patch_bank = PatchBank(str(self.save_dir / "patch_artifacts"))
         self._build_executor: ThreadPoolExecutor | None = None
         self._build_future: Future | None = None
+        self._build_lock = threading.RLock()
 
     def load(self) -> None:
-        self._patch_bank.load()
-        self.episodes = self._load_records("episodes.json", EpisodeRecord)
-        self.memories = self._load_records("memories.json", ClusterMemory)
-        self._episode_index = {ep.episode_id: i for i, ep in enumerate(self.episodes)}
-        self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
+        with self._build_lock:
+            self._patch_bank.load()
+            self.episodes = self._load_records("episodes.json", EpisodeRecord)
+            self.memories = self._load_records("memories.json", ClusterMemory)
+            self._episode_index = {ep.episode_id: i for i, ep in enumerate(self.episodes)}
+            self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
 
     def save(self) -> None:
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-        self._patch_bank.save()
-        self._save_records("episodes.json", self.episodes)
-        self._save_records("memories.json", self.memories)
+        with self._build_lock:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            self._patch_bank.save()
+            self._save_records("episodes.json", self.episodes)
+            self._save_records("memories.json", self.memories)
 
     def record_episode(
         self,
@@ -133,26 +137,27 @@ class ClusterMemoryBank:
         family_label: str | None = None,
         episode_id: str | None = None,
     ) -> EpisodeRecord:
-        label = family_label or derive_family_label(prompt)
-        eid = episode_id or _make_episode_id(task_id, prompt, failed_code, passed_code)
-        episode = EpisodeRecord(
-            episode_id=eid,
-            task_id=task_id,
-            task_embedding=list(task_embedding),
-            prompt=prompt,
-            family_label=label,
-            failed_code=failed_code,
-            passed_code=passed_code,
-            pass_fail_similarity=float(pass_fail_similarity),
-            success=bool(success),
-        )
-        idx = self._episode_index.get(eid)
-        if idx is None:
-            self._episode_index[eid] = len(self.episodes)
-            self.episodes.append(episode)
-        else:
-            self.episodes[idx] = episode
-        return episode
+        with self._build_lock:
+            label = family_label or derive_family_label(prompt)
+            eid = episode_id or _make_episode_id(task_id, prompt, failed_code, passed_code)
+            episode = EpisodeRecord(
+                episode_id=eid,
+                task_id=task_id,
+                task_embedding=list(task_embedding),
+                prompt=prompt,
+                family_label=label,
+                failed_code=failed_code,
+                passed_code=passed_code,
+                pass_fail_similarity=float(pass_fail_similarity),
+                success=bool(success),
+            )
+            idx = self._episode_index.get(eid)
+            if idx is None:
+                self._episode_index[eid] = len(self.episodes)
+                self.episodes.append(episode)
+            else:
+                self.episodes[idx] = episode
+            return episode
 
     def build_memories(
         self,
@@ -168,68 +173,70 @@ class ClusterMemoryBank:
         distill_steps: int = DEFAULT_PATCH_TRAIN_STEPS,
         distill_lr: float = DEFAULT_PATCH_LR,
     ) -> dict[str, Any]:
-        eligible = [
-            ep for ep in self.episodes
-            if ep.success and ep.passed_code.strip() and ep.failed_code.strip()
-        ]
-        groups = _cluster_episodes(eligible, similarity_threshold, min_support)
+        with self._build_lock:
+            eligible = [
+                ep for ep in self.episodes
+                if ep.success and ep.passed_code.strip() and ep.failed_code.strip()
+            ]
+            eligible_episode_ids = {episode.episode_id for episode in eligible}
+            groups = _cluster_episodes(eligible, similarity_threshold, min_support)
 
-        memories: list[ClusterMemory] = []
-        for group in groups:
-            layer_window = _resolve_layer_window(base_model, layer_window_size)
-            deltas = [
-                _compute_episode_delta(
+            memories: list[ClusterMemory] = []
+            for group in groups:
+                layer_window = _resolve_layer_window(base_model, layer_window_size)
+                deltas = [
+                    _compute_episode_delta(
+                        base_model,
+                        tokenizer,
+                        ep.failed_code,
+                        ep.passed_code,
+                        layer_window=layer_window,
+                        token_window=token_window,
+                    )
+                    for ep in group
+                ]
+                directions, explained = compute_top_contrast_directions(
+                    np.stack(deltas, axis=0),
+                    top_k=top_directions,
+                )
+                memory = ClusterMemory(
+                    memory_id=_make_memory_id(group),
+                    family_label=group[0].family_label,
+                    centroid_embedding=np.mean(
+                        np.asarray([ep.task_embedding for ep in group], dtype=np.float32),
+                        axis=0,
+                    ).tolist(),
+                    member_episode_ids=[ep.episode_id for ep in group],
+                    support_count=len(group),
+                    layer_window=list(layer_window),
+                    token_window=token_window,
+                    top_contrast_directions=[direction.tolist() for direction in directions],
+                    explained_variance=explained,
+                    created_at=max(ep.created_at for ep in group),
+                )
+                _distill_and_score_memory(
+                    memory,
+                    group,
+                    eligible,
+                    self._patch_bank,
                     base_model,
                     tokenizer,
-                    ep.failed_code,
-                    ep.passed_code,
-                    layer_window=layer_window,
-                    token_window=token_window,
+                    distill_rank=distill_rank,
+                    distill_steps=distill_steps,
+                    distill_lr=distill_lr,
+                    control_episodes=control_episodes,
                 )
-                for ep in group
-            ]
-            directions, explained = compute_top_contrast_directions(
-                np.stack(deltas, axis=0),
-                top_k=top_directions,
-            )
-            memory = ClusterMemory(
-                memory_id=_make_memory_id(group),
-                family_label=group[0].family_label,
-                centroid_embedding=np.mean(
-                    np.asarray([ep.task_embedding for ep in group], dtype=np.float32),
-                    axis=0,
-                ).tolist(),
-                member_episode_ids=[ep.episode_id for ep in group],
-                support_count=len(group),
-                layer_window=list(layer_window),
-                token_window=token_window,
-                top_contrast_directions=[direction.tolist() for direction in directions],
-                explained_variance=explained,
-                created_at=max(ep.created_at for ep in group),
-            )
-            _distill_and_score_memory(
-                memory,
-                group,
-                self.episodes,
-                self._patch_bank,
-                base_model,
-                tokenizer,
-                distill_rank=distill_rank,
-                distill_steps=distill_steps,
-                distill_lr=distill_lr,
-                control_episodes=control_episodes,
-            )
-            memories.append(memory)
+                memories.append(memory)
 
-        memories = self._merge_memories(memories)
-        _apply_recency_scores(memories)
-        _apply_redundancy_penalties(memories)
-        _recompute_q_values(memories)
+            memories = self._merge_memories(memories, eligible_episode_ids)
+            _apply_recency_scores(memories)
+            _apply_redundancy_penalties(memories)
+            _recompute_q_values(memories)
 
-        self.memories = memories
-        self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
-        self.save()
-        return self.stats()
+            self.memories = memories
+            self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
+            self.save()
+            return self.stats()
 
     def get_active_memories(
         self,
@@ -295,23 +302,24 @@ class ClusterMemoryBank:
         cold_succeeded: bool | None = None,
         persist: bool = True,
     ) -> None:
-        idx = self._memory_index.get(memory_id)
-        if idx is None:
-            return
+        with self._build_lock:
+            idx = self._memory_index.get(memory_id)
+            if idx is None:
+                return
 
-        memory = self.memories[idx]
-        memory.reuse_count += 1
-        memory.last_used_at = time.time()
+            memory = self.memories[idx]
+            memory.reuse_count += 1
+            memory.last_used_at = time.time()
 
-        if cold_succeeded is True and not task_succeeded:
-            memory.utility_regression = min(1.0, memory.utility_regression + 0.1)
-        elif cold_succeeded is False and task_succeeded:
-            memory.utility_regression = max(0.0, memory.utility_regression - 0.05)
+            if cold_succeeded is True and not task_succeeded:
+                memory.utility_regression = min(1.0, memory.utility_regression + 0.1)
+            elif cold_succeeded is False and task_succeeded:
+                memory.utility_regression = max(0.0, memory.utility_regression - 0.05)
 
-        _apply_recency_scores(self.memories)
-        _recompute_q_values(self.memories)
-        if persist:
-            self.save()
+            _apply_recency_scores(self.memories)
+            _recompute_q_values(self.memories)
+            if persist:
+                self.save()
 
     def schedule_build_memories(
         self,
@@ -320,22 +328,24 @@ class ClusterMemoryBank:
         **build_kwargs,
     ) -> Future:
         """Schedule ``build_memories`` on a background worker."""
-        if self._build_executor is None:
-            self._build_executor = ThreadPoolExecutor(max_workers=1)
-        self._build_future = self._build_executor.submit(
-            self.build_memories,
-            base_model,
-            tokenizer,
-            **build_kwargs,
-        )
-        return self._build_future
+        with self._build_lock:
+            if self._build_executor is None:
+                self._build_executor = ThreadPoolExecutor(max_workers=1)
+            self._build_future = self._build_executor.submit(
+                self.build_memories,
+                base_model,
+                tokenizer,
+                **build_kwargs,
+            )
+            return self._build_future
 
     def flush_pending_build(self) -> None:
         """Wait for and surface any pending asynchronous build result."""
-        if self._build_future is None:
-            return
-        future = self._build_future
-        self._build_future = None
+        with self._build_lock:
+            if self._build_future is None:
+                return
+            future = self._build_future
+            self._build_future = None
         future.result()
 
     def stats(self) -> dict[str, Any]:
@@ -369,14 +379,17 @@ class ClusterMemoryBank:
             raw = json.load(handle)
         return [record_type.from_dict(item) for item in raw]
 
-    def _merge_memories(self, new_memories: list[ClusterMemory]) -> list[ClusterMemory]:
+    def _merge_memories(
+        self,
+        new_memories: list[ClusterMemory],
+        eligible_episode_ids: set[str],
+    ) -> list[ClusterMemory]:
         """Merge freshly built memories with historical ones instead of replacing them."""
         existing_by_id = {memory.memory_id: memory for memory in self.memories}
         existing_by_members = {
             frozenset(memory.member_episode_ids): memory
             for memory in self.memories
         }
-        episode_ids = {episode.episode_id for episode in self.episodes}
         merged: list[ClusterMemory] = []
         retained_ids: set[str] = set()
 
@@ -396,7 +409,7 @@ class ClusterMemoryBank:
         for existing in self.memories:
             if existing.memory_id in retained_ids:
                 continue
-            if set(existing.member_episode_ids).issubset(episode_ids):
+            if set(existing.member_episode_ids).issubset(eligible_episode_ids):
                 merged.append(existing)
 
         return merged

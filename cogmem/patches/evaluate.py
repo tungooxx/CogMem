@@ -61,8 +61,7 @@ def evaluate_patched(
     for i, task in enumerate(tasks):
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
-
-        active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+        active_patches = []
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -70,6 +69,7 @@ def evaluate_patched(
         ]
 
         try:
+            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 response = generate_with_model(base_model, tokenizer, messages, temperature=0)
             code = extract_code(response)
@@ -106,8 +106,7 @@ def evaluate_best_of_n(
     for i, task in enumerate(tasks):
         prompt = task.get("instruct_prompt", task.get("complete_prompt", ""))
         task_embedding = embedder.encode(prompt).tolist()
-
-        active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+        active_patches = []
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -116,6 +115,7 @@ def evaluate_best_of_n(
 
         task_passed = False
         try:
+            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 for _ in range(n):
                     try:
