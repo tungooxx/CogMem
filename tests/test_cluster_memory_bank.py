@@ -7,6 +7,7 @@ from cogmem.patches.memory_bank import (
     ClusterMemory,
     ClusterMemoryBank,
     _apply_redundancy_penalties,
+    _recompute_q_values,
     compute_top_contrast_directions,
 )
 from cogmem.patches.patch import CognitivePatch
@@ -142,6 +143,89 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
     assert selected[0].memory_id == "memory_high"
 
 
+def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    bank.artifact_bank.add(
+        CognitivePatch(
+            patch_id="patch_low",
+            embedding=[0.0, 0.0],
+            lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+        )
+    )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_low_gate",
+            family_label="networking",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            negative_prototype=[0.95, 0.05],
+            distilled_patch_ids=["patch_low"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.10,
+            retrieval_threshold=0.35,
+        ),
+    ]
+
+    selected = bank.get_active_memories([0.95, 0.05], "open a socket on a url", top_k=1)
+
+    assert selected == []
+
+
+def test_structural_match_can_break_similarity_tie(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    for patch_id in ("patch_sort", "patch_plot"):
+        bank.artifact_bank.add(
+            CognitivePatch(
+                patch_id=patch_id,
+                embedding=[0.0, 0.0],
+                lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+            )
+        )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_sort",
+            family_label="general_code",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            structural_markers=["sorted", "mutation"],
+            distilled_patch_ids=["patch_sort"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.5,
+        ),
+        ClusterMemory(
+            memory_id="memory_plot",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            structural_markers=["histogram", "matplotlib"],
+            distilled_patch_ids=["patch_plot"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.5,
+        ),
+    ]
+
+    selected = bank.get_active_memories(
+        [1.0, 0.0],
+        "return a sorted copy without mutating the input list",
+        top_k=1,
+    )
+
+    assert selected[0].memory_id == "memory_sort"
+
+
 def test_redundancy_penalty_hits_near_duplicate_memories():
     memories = [
         ClusterMemory(
@@ -178,6 +262,40 @@ def test_redundancy_penalty_hits_near_duplicate_memories():
     assert memories[0].redundancy_penalty > 0.8
     assert memories[1].redundancy_penalty > 0.8
     assert memories[2].redundancy_penalty == 0.0
+
+
+def test_q_value_penalizes_unseen_hurt():
+    safe = ClusterMemory(
+        memory_id="m_safe",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_safe"],
+        distillation_success=1.0,
+        held_out_steering_gain=0.4,
+        transfer_rate=0.8,
+    )
+    risky = ClusterMemory(
+        memory_id="m_risky",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep4", "ep5", "ep6"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_risky"],
+        distillation_success=1.0,
+        held_out_steering_gain=0.4,
+        transfer_rate=0.8,
+        unseen_hurt_count=3,
+    )
+
+    _recompute_q_values([safe, risky])
+
+    assert safe.q_value > risky.q_value
 
 
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):
