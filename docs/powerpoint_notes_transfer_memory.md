@@ -9,6 +9,36 @@ Transfer improves only when memory stops being a pile of single-task patches and
 becomes an evidence-backed repair object with applicability boundaries, negative
 support, and transfer-aware Q.
 
+## Old vs New
+
+### Old
+
+- Patch-first memory.
+- Immediate promotion from a single task into the active bank.
+- Retrieval was dominated by nearest prompt embedding.
+- Q mostly sounded like generic usefulness.
+- Little or no explicit negative support.
+- No real abstention boundary per memory.
+- Easy for broad memories to help seen tasks but hurt unseen tasks.
+
+### New
+
+- Episode-first memory.
+- Save episode -> cluster episodes -> distill candidate patch -> validate -> then retrieve.
+- Retrievable object is no longer just a patch id plus embedding.
+- Retrievable memory object now groups:
+  - `cluster_metadata`
+  - `evidence`
+  - `transfer_stats`
+  - `patch_ids`
+- Retrieval uses a gated score:
+  - positive prototype similarity
+  - minus negative prototype similarity
+  - plus transfer-aware Q
+  - plus structural match
+- Every memory has an abstention boundary through `retrieval_threshold`.
+- Q is now transfer-aware, so unseen hurt can lower Q and eventually disable retrieval.
+
 ## What Changed
 
 ### Patch creation
