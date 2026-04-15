@@ -7,8 +7,10 @@ from cogmem.patches.memory_bank import (
     ClusterMemory,
     ClusterMemoryBank,
     _apply_redundancy_penalties,
+    _apply_sleep_promotion_policies,
     _recompute_q_values,
     compute_top_contrast_directions,
+    score_memory_final_use,
 )
 from cogmem.patches.patch import CognitivePatch
 
@@ -128,7 +130,7 @@ def test_active_patches_skip_non_retrievable_memories(tmp_path):
     assert active == []
 
 
-def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
+def test_retrieval_prefers_higher_final_use_when_similarity_is_close(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     for patch_id in ("patch_hi", "patch_lo"):
         bank.artifact_bank.add(
@@ -151,7 +153,9 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_lo"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.10,
+            transfer_gain=0.55,
+            recent_success_rate=0.55,
+            promotion_score=0.10,
         ),
         ClusterMemory(
             memory_id="memory_high",
@@ -164,7 +168,9 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_hi"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.90,
+            transfer_gain=0.50,
+            recent_success_rate=0.50,
+            promotion_score=0.85,
         ),
     ]
     bank.save()
@@ -173,6 +179,115 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
     selected = bank.get_active_memories([1.0, 0.0], "plot a dataframe histogram", top_k=1)
 
     assert selected[0].memory_id == "memory_high"
+
+
+def test_default_retrieval_uses_top1_unless_confidence_is_very_high(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    for patch_id in ("patch_a", "patch_b"):
+        bank.artifact_bank.add(
+            CognitivePatch(
+                patch_id=patch_id,
+                embedding=[0.0, 0.0],
+                lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+            )
+        )
+
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_a"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.60,
+            recent_success_rate=0.60,
+            promotion_score=0.40,
+            retrieval_threshold=0.40,
+        ),
+        ClusterMemory(
+            memory_id="memory_b",
+            family_label="plotting",
+            centroid_embedding=[0.99, 0.01],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[0.99, 0.01],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_b"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.58,
+            recent_success_rate=0.58,
+            promotion_score=0.35,
+            retrieval_threshold=0.40,
+        ),
+    ]
+
+    selected = bank.get_active_memories([1.0, 0.0], "plot a histogram", top_k=5)
+
+    assert len(selected) == 1
+    assert selected[0].memory_id == "memory_a"
+
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_a"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.95,
+            recent_success_rate=0.95,
+            promotion_score=0.90,
+            reuse_count=10,
+            retrieval_threshold=0.40,
+        ),
+        ClusterMemory(
+            memory_id="memory_b",
+            family_label="plotting",
+            centroid_embedding=[0.999, 0.001],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[0.999, 0.001],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_b"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.94,
+            recent_success_rate=0.94,
+            promotion_score=0.89,
+            reuse_count=10,
+            retrieval_threshold=0.40,
+        ),
+    ]
+
+    from cogmem.patches import memory_bank as memory_bank_module
+    original_confidence = memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE
+    try:
+        memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE = 0.55
+        selected = bank.get_active_memories([1.0, 0.0], "plot a histogram", top_k=5)
+    finally:
+        memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE = original_confidence
+
+    selected_ids = {memory.memory_id for memory in selected}
+    assert len(selected) > 1
+    assert {"memory_a", "memory_b"}.issubset(selected_ids)
 
 
 def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
@@ -198,7 +313,8 @@ def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
             distilled_patch_ids=["patch_low"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.10,
+            transfer_gain=0.9,
+            recent_success_rate=0.9,
             retrieval_threshold=0.35,
         ),
     ]
@@ -231,7 +347,8 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
             distilled_patch_ids=["patch_sort"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.5,
+            transfer_gain=0.6,
+            recent_success_rate=0.6,
         ),
         ClusterMemory(
             memory_id="memory_plot",
@@ -245,7 +362,8 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
             distilled_patch_ids=["patch_plot"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.5,
+            transfer_gain=0.6,
+            recent_success_rate=0.6,
         ),
     ]
 
@@ -325,7 +443,7 @@ def test_redundancy_penalty_hits_near_duplicate_memories():
     assert memories[2].redundancy_penalty == 0.0
 
 
-def test_q_value_penalizes_unseen_hurt():
+def test_promotion_score_penalizes_unseen_hurt():
     safe = ClusterMemory(
         memory_id="m_safe",
         family_label="general_code",
@@ -356,7 +474,32 @@ def test_q_value_penalizes_unseen_hurt():
 
     _recompute_q_values([safe, risky])
 
+    assert safe.promotion_score > risky.promotion_score
     assert safe.q_value > risky.q_value
+
+
+def test_recompute_q_values_preserves_heldout_transfer_gain_and_tracks_online_gain():
+    memory = ClusterMemory(
+        memory_id="m_transfer",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_transfer"],
+        distillation_success=1.0,
+        transfer_gain=0.72,
+        seen_help_count=1,
+        seen_hurt_count=1,
+        unseen_help_count=1,
+        unseen_hurt_count=1,
+    )
+
+    _recompute_q_values([memory])
+
+    assert memory.transfer_gain == 0.72
+    assert memory.transfer_online_gain == 0.5
 
 
 def test_merge_memories_preserves_transfer_counters(tmp_path):
@@ -417,8 +560,9 @@ def test_unseen_hurt_demotes_memory_from_retrieval():
     )
 
     _recompute_q_values([risky])
+    demoted = _apply_sleep_promotion_policies([risky], prune=False)
 
-    assert risky.retrievable is False
+    assert demoted[0].retrievable is False
 
 
 def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
@@ -462,6 +606,49 @@ def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
     bank.update_memory_utility("memory_plot", task_succeeded=True, persist=False)
 
     assert bank.memories[0].retrieval_threshold != 0.0
+
+
+def test_load_patches_for_memories_uses_final_use_score(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    patch = CognitivePatch(
+        patch_id="patch_plot",
+        embedding=[1.0, 0.0],
+        lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+    )
+    bank.artifact_bank.add(patch)
+    memory = ClusterMemory(
+        memory_id="memory_plot",
+        family_label="plotting",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        structural_markers=["histogram"],
+        distilled_patch_ids=["patch_plot"],
+        distillation_success=1.0,
+        retrievable=True,
+        promotion_score=0.9,
+        transfer_gain=0.5,
+        recent_success_rate=0.5,
+    )
+    bank.memories = [memory]
+
+    loaded = bank.load_patches_for_memories(
+        [memory],
+        query_embedding=[1.0, 0.0],
+        task_prompt="plot a histogram",
+    )
+
+    assert len(loaded) == 1
+    expected = score_memory_final_use(
+        memory,
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        "plot a histogram",
+        max_reuse=0,
+    )
+    assert loaded[0].q_value == expected
+    assert loaded[0].q_value != memory.promotion_score
 
 
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):
