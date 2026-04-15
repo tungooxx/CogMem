@@ -62,6 +62,25 @@ Only retrieve when:
 
 `RetrieveScore(m, q) > tau_m`
 
+### Current code formula
+
+The current implementation uses:
+
+`RetrieveScore(m, q) = 0.45 * sim(q, pos_prototype_m) - 0.20 * sim(q, neg_prototype_m) + 0.25 * Q_m + 0.10 * structural_match(q, m)`
+
+Where:
+
+- `pos_prototype_m` is the memory centroid / positive prototype
+- `neg_prototype_m` is a small hard-negative pool near the cluster boundary
+- `structural_match(q, m)` mixes prompt marker overlap with family match
+
+The current gate is:
+
+- retrieve only if `RetrieveScore(m, q) > retrieval_threshold_m`
+- `retrieval_threshold_m` is set from the midpoint between:
+  - the 25th percentile of positive example scores
+  - the 85th percentile of negative-pool scores
+
 The current code now models this with:
 
 - `positive_prototype`: where the memory tends to work
@@ -113,6 +132,21 @@ The intended utility is no longer "generic usefulness". It is transfer-aware
 utility:
 
 `Q(m) = a * local_gain + b * heldout_gain + c * transfer_gain - d * unseen_hurt - e * redundancy`
+
+### Current code formula
+
+The current implementation uses:
+
+`Q(m) = 0.22 * local_support_gain + 0.23 * held_out_steering_gain + 0.20 * transfer_gain`
+
+`      + 0.05 * distillation_success + 0.05 * recency_score + 0.05 * seen_help_rate + 0.05 * normalized_reuse`
+
+`      - 0.10 * utility_regression - 0.10 * negative_steering_penalty - 0.10 * redundancy_penalty - 0.15 * unseen_hurt_rate`
+
+And a memory is demoted from retrieval if:
+
+- it has no distilled patch ids, or distillation failed
+- or `unseen_hurt_count >= 2` and `unseen_hurt_count > unseen_help_count`
 
 Operationally this means a memory should score highly only if it:
 
