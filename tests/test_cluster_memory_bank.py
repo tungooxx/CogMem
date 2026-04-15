@@ -7,9 +7,10 @@ from cogmem.patches.memory_bank import (
     ClusterMemory,
     ClusterMemoryBank,
     _apply_redundancy_penalties,
+    _apply_sleep_promotion_policies,
     _recompute_q_values,
     compute_top_contrast_directions,
-    score_memory_use,
+    score_memory_final_use,
 )
 from cogmem.patches.patch import CognitivePatch
 
@@ -129,7 +130,7 @@ def test_active_patches_skip_non_retrievable_memories(tmp_path):
     assert active == []
 
 
-def test_retrieval_prefers_higher_use_score_when_similarity_is_close(tmp_path):
+def test_retrieval_prefers_higher_final_use_when_similarity_is_close(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     for patch_id in ("patch_hi", "patch_lo"):
         bank.artifact_bank.add(
@@ -152,8 +153,9 @@ def test_retrieval_prefers_higher_use_score_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_lo"],
             distillation_success=1.0,
             retrievable=True,
-            transfer_gain=0.10,
-            recent_success_rate=0.10,
+            transfer_gain=0.55,
+            recent_success_rate=0.55,
+            promotion_score=0.10,
         ),
         ClusterMemory(
             memory_id="memory_high",
@@ -166,8 +168,9 @@ def test_retrieval_prefers_higher_use_score_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_hi"],
             distillation_success=1.0,
             retrievable=True,
-            transfer_gain=0.90,
-            recent_success_rate=0.90,
+            transfer_gain=0.50,
+            recent_success_rate=0.50,
+            promotion_score=0.85,
         ),
     ]
     bank.save()
@@ -176,6 +179,62 @@ def test_retrieval_prefers_higher_use_score_when_similarity_is_close(tmp_path):
     selected = bank.get_active_memories([1.0, 0.0], "plot a dataframe histogram", top_k=1)
 
     assert selected[0].memory_id == "memory_high"
+
+
+def test_default_retrieval_uses_top1_unless_confidence_is_very_high(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    for patch_id in ("patch_a", "patch_b"):
+        bank.artifact_bank.add(
+            CognitivePatch(
+                patch_id=patch_id,
+                embedding=[0.0, 0.0],
+                lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+            )
+        )
+
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_a"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.60,
+            recent_success_rate=0.60,
+            promotion_score=0.40,
+            retrieval_threshold=0.40,
+        ),
+        ClusterMemory(
+            memory_id="memory_b",
+            family_label="plotting",
+            centroid_embedding=[0.99, 0.01],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[0.99, 0.01],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_b"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.58,
+            recent_success_rate=0.58,
+            promotion_score=0.35,
+            retrieval_threshold=0.40,
+        ),
+    ]
+
+    selected = bank.get_active_memories([1.0, 0.0], "plot a histogram", top_k=5)
+
+    assert len(selected) == 1
+    assert selected[0].memory_id == "memory_a"
 
 
 def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
@@ -424,8 +483,9 @@ def test_unseen_hurt_demotes_memory_from_retrieval():
     )
 
     _recompute_q_values([risky])
+    demoted = _apply_sleep_promotion_policies([risky], prune=False)
 
-    assert risky.retrievable is False
+    assert demoted[0].retrievable is False
 
 
 def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
@@ -471,7 +531,7 @@ def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
     assert bank.memories[0].retrieval_threshold != 0.0
 
 
-def test_load_patches_for_memories_uses_query_time_use_score(tmp_path):
+def test_load_patches_for_memories_uses_final_use_score(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     patch = CognitivePatch(
         patch_id="patch_plot",
@@ -504,7 +564,7 @@ def test_load_patches_for_memories_uses_query_time_use_score(tmp_path):
     )
 
     assert len(loaded) == 1
-    expected = score_memory_use(
+    expected = score_memory_final_use(
         memory,
         np.asarray([1.0, 0.0], dtype=np.float32),
         "plot a histogram",

@@ -52,13 +52,20 @@ support, and transfer-aware Q.
 
 Retrieval should not be "nearest prompt embedding wins".
 
-Use a gated applicability score plus a separate query-time use score:
+Wake now uses a three-step policy:
 
 `applicability(m, q) = w1 * sim(q, pos_prototype_m) - w2 * sim(q, neg_prototype_m) + w3 * structural_match(q, m)`
 
 `Q_use(m, q) = applicability(m, q) * (u1 * transfer_gain + u2 * recent_success + u3 * reuse - u4 * online_hurt)`
 
-Only retrieve when `Q_use(m, q)` clears the memory's threshold.
+`FinalUse(m, q) = Q_use(m, q) + 0.15 * Q_promote(m)`
+
+Wake behavior:
+
+- compute applicability
+- drop memories below their applicability threshold
+- rank the remaining memories by `FinalUse`
+- use top-1 unless confidence is very high
 
 ### Current code formula
 
@@ -79,6 +86,11 @@ Q_use(m, q) = applicability(m, q) * clip(
   - 0.20 * online_hurt_rate,
   0, 1
 )
+
+FinalUse(m, q) = clip(
+    Q_use(m, q) + 0.15 * Q_promote(m),
+    0, 1
+)
 ```
 
 Where:
@@ -88,12 +100,19 @@ Where:
 - `structural_match(q, m)` mixes prompt marker overlap with family match
 - `log_reuse` is `log(1 + reuse_count)` normalized by the largest reuse count in the bank
 
-The current gate is:
+The current gate is on applicability:
 
-- retrieve only if `Q_use(m, q) > retrieval_threshold_m`
+- retrieve only if `applicability(m, q) > retrieval_threshold_m`
 - `retrieval_threshold_m` is set from the midpoint between:
-  - the 25th percentile of positive example scores
-  - the 85th percentile of negative-pool scores
+  - the 25th percentile of positive-example applicability scores
+  - the 85th percentile of negative-pool applicability scores
+
+The current composition rule is:
+
+- return only the best memory by default
+- only return more than one memory when:
+  - the top memory has very high `FinalUse`
+  - and the next memories stay within a small margin of the top memory
 
 The current code now models this with:
 
@@ -118,6 +137,11 @@ The system now separates:
 
 - `Q_promote(m)`: should this memory stay trusted, merge, or be demoted?
 - `Q_use(m, q)`: should this memory fire on this query right now?
+
+The split now maps cleanly onto wake vs sleep:
+
+- wake decides activation with `applicability`, `Q_use`, and `FinalUse`
+- sleep decides promotion, demotion, and pruning with `Q_promote`
 
 ## Why This Improves Transfer
 
@@ -154,11 +178,13 @@ promotion score built from transfer evidence, support, and harm:
 The current implementation uses:
 
 ```text
-Q_promote(m) = 0.30 * held_out_steering_gain
-             + 0.25 * transfer_gain
-             + 0.15 * local_support_gain
+Q_promote(m) = 0.28 * held_out_steering_gain
+             + 0.22 * transfer_gain
+             + 0.12 * local_support_gain
              + 0.10 * distillation_success
-             + 0.10 * log_support
+             + 0.08 * log_support
+             + 0.10 * recent_success_rate
+             - 0.10 * online_hurt_rate
              - 0.15 * utility_regression
              - 0.15 * unseen_hurt_rate
              - 0.10 * redundancy_penalty
@@ -172,13 +198,25 @@ Where:
 And a memory is demoted from retrieval if:
 
 - it has no distilled patch ids, or distillation failed
-- or `unseen_hurt_count >= 2` and `unseen_hurt_count > unseen_help_count`
+- or `promotion_score < 0.40`
+- or `support_count < 3`
+- or it is harming the preserve set:
+  - `online_hurt_rate >= 0.60`
+  - or `utility_regression >= 0.35`
+  - or `unseen_hurt_count >= 2` and `unseen_hurt_count > unseen_help_count`
+
+And a memory may be pruned during sleep if:
+
+- `promotion_score <= 0.10`
+- `support_count < 3`
+- and it is already harming the preserve set
 
 Operationally this means a memory should score highly only if it:
 
 - helps on support tasks
 - helps on held-out similar tasks
 - carries enough repeated support to be worth keeping
+- keeps helping in actual online use
 - does not hurt confusing nearby tasks
 - is not redundant with other memories
 

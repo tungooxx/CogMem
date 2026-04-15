@@ -45,6 +45,12 @@ DEFAULT_USE_TRANSFER_WEIGHT = 0.45
 DEFAULT_USE_RECENT_SUCCESS_WEIGHT = 0.20
 DEFAULT_USE_REUSE_WEIGHT = 0.15
 DEFAULT_USE_ONLINE_HURT_WEIGHT = 0.20
+DEFAULT_FINAL_USE_PROMOTE_WEIGHT = 0.15
+DEFAULT_MULTI_MEMORY_CONFIDENCE = 0.80
+DEFAULT_MULTI_MEMORY_MARGIN = 0.05
+DEFAULT_SLEEP_PROMOTE_MIN_SCORE = 0.40
+DEFAULT_SLEEP_PROMOTE_MIN_SUPPORT = 3
+DEFAULT_SLEEP_PRUNE_MAX_SCORE = 0.10
 DEFAULT_RETRIEVE_NEGATIVE_POOL = 8
 DEFAULT_RETRIEVE_MARKERS = 8
 STOPWORDS = {
@@ -326,15 +332,9 @@ class ClusterMemoryBank:
                 memories.append(memory)
 
             memories = self._merge_memories(memories, eligible_episode_ids)
-            _apply_recency_scores(memories)
-            _apply_redundancy_penalties(memories)
-            _recompute_q_values(memories)
-            _apply_retrieval_thresholds(memories, eligible)
-
             self.memories = memories
             self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
-            self.save()
-            return self.stats()
+            return self.run_sleep_cycle(prune=True)
 
     def get_active_memories(
         self,
@@ -347,23 +347,34 @@ class ClusterMemoryBank:
 
         query = np.asarray(query_embedding, dtype=np.float32)
         max_reuse = max((memory.reuse_count for memory in self.memories), default=0)
-        scored: list[tuple[float, ClusterMemory]] = []
+        scored: list[tuple[float, float, float, ClusterMemory]] = []
 
         for memory in self.memories:
             if not memory.retrievable or not memory.distilled_patch_ids:
                 continue
-            score = score_memory_use(
+            applicability = compute_applicability(
+                memory,
+                query,
+                task_prompt,
+            )
+            if applicability <= memory.retrieval_threshold:
+                continue
+            use_score = score_memory_use(
                 memory,
                 query,
                 task_prompt,
                 max_reuse=max_reuse,
             )
-            if score <= memory.retrieval_threshold:
-                continue
-            scored.append((score, memory))
+            final_use = score_memory_final_use(
+                memory,
+                query,
+                task_prompt,
+                max_reuse=max_reuse,
+            )
+            scored.append((final_use, use_score, applicability, memory))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [memory for _, memory in scored[:top_k]]
+        return _select_top_memories(scored, top_k=top_k)
 
     def get_active_patches(
         self,
@@ -405,7 +416,7 @@ class ClusterMemoryBank:
                     continue
                 self._patch_bank.load_weights(patch)
                 if query is not None:
-                    patch.q_value = score_memory_use(
+                    patch.q_value = score_memory_final_use(
                         memory,
                         query,
                         task_prompt,
@@ -456,6 +467,8 @@ class ClusterMemoryBank:
 
             _apply_recency_scores(self.memories)
             _recompute_q_values(self.memories)
+            self.memories = _apply_sleep_promotion_policies(self.memories, prune=False)
+            self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
             eligible = [
                 episode for episode in self.episodes
                 if episode.success and episode.passed_code.strip() and episode.failed_code.strip()
@@ -464,6 +477,23 @@ class ClusterMemoryBank:
                 _apply_retrieval_thresholds(self.memories, eligible)
             if persist:
                 self.save()
+
+    def run_sleep_cycle(self, prune: bool = True) -> dict[str, Any]:
+        """Recompute promotion trust, demote harmful memories, and refresh gates."""
+        with self._build_lock:
+            _apply_recency_scores(self.memories)
+            _apply_redundancy_penalties(self.memories)
+            _recompute_q_values(self.memories)
+            self.memories = _apply_sleep_promotion_policies(self.memories, prune=prune)
+            eligible = [
+                episode for episode in self.episodes
+                if episode.success and episode.passed_code.strip() and episode.failed_code.strip()
+            ]
+            if eligible:
+                _apply_retrieval_thresholds(self.memories, eligible)
+            self._memory_index = {mem.memory_id: i for i, mem in enumerate(self.memories)}
+            self.save()
+            return self.stats()
 
     def schedule_build_memories(
         self,
@@ -501,6 +531,10 @@ class ClusterMemoryBank:
             "memories": len(self.memories),
             "retrievable_memories": sum(1 for memory in self.memories if memory.retrievable),
             "artifact_patches": len(self._patch_bank.patches),
+            "mean_promotion": (
+                float(np.mean([memory.promotion_score for memory in self.memories]))
+                if self.memories else 0.0
+            ),
             "mean_q": float(np.mean([memory.q_value for memory in self.memories])) if self.memories else 0.0,
             "families": family_counts,
         }
@@ -691,11 +725,13 @@ def score_memory_promotion(
     )
     support_score = _normalized_log_score(memory.support_count, max_support)
     q = (
-        0.30 * float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
-        + 0.25 * float(np.clip(memory.transfer_gain, 0.0, 1.0))
-        + 0.15 * float(np.clip(memory.local_support_gain, 0.0, 1.0))
+        0.28 * float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
+        + 0.22 * float(np.clip(memory.transfer_gain, 0.0, 1.0))
+        + 0.12 * float(np.clip(memory.local_support_gain, 0.0, 1.0))
         + 0.10 * float(np.clip(memory.distillation_success, 0.0, 1.0))
-        + 0.10 * support_score
+        + 0.08 * support_score
+        + 0.10 * float(np.clip(memory.recent_success_rate, 0.0, 1.0))
+        - 0.10 * float(np.clip(memory.online_hurt_rate, 0.0, 1.0))
         - 0.15 * float(np.clip(memory.utility_regression, 0.0, 1.0))
         - 0.15 * float(np.clip(unseen_hurt_rate, 0.0, 1.0))
         - 0.10 * float(np.clip(memory.redundancy_penalty, 0.0, 1.0))
@@ -731,13 +767,60 @@ def score_memory_use(
     return float(np.clip(applicability * trust_now, 0.0, 1.0))
 
 
+def score_memory_final_use(
+    memory: ClusterMemory,
+    query_embedding: np.ndarray,
+    task_prompt: str,
+    *,
+    max_reuse: int = 0,
+) -> float:
+    use_score = score_memory_use(
+        memory,
+        query_embedding,
+        task_prompt,
+        max_reuse=max_reuse,
+    )
+    return float(
+        np.clip(
+            use_score + DEFAULT_FINAL_USE_PROMOTE_WEIGHT * memory.promotion_score,
+            0.0,
+            1.0,
+        )
+    )
+
+
 def score_memory_retrieval(
     memory: ClusterMemory,
     query_embedding: np.ndarray,
     task_prompt: str,
 ) -> float:
-    """Backward-compatible alias for the query-time use score."""
-    return score_memory_use(memory, query_embedding, task_prompt, max_reuse=memory.reuse_count)
+    """Backward-compatible alias for the final retrieval-time ranking score."""
+    return score_memory_final_use(memory, query_embedding, task_prompt, max_reuse=memory.reuse_count)
+
+
+def _select_top_memories(
+    scored: list[tuple[float, float, float, ClusterMemory]],
+    top_k: int,
+) -> list[ClusterMemory]:
+    if not scored:
+        return []
+    if top_k <= 1 or len(scored) == 1:
+        return [scored[0][3]]
+
+    top_final_use = scored[0][0]
+    if top_final_use < DEFAULT_MULTI_MEMORY_CONFIDENCE:
+        return [scored[0][3]]
+
+    selected: list[ClusterMemory] = [scored[0][3]]
+    for final_use, _, _, memory in scored[1:]:
+        if len(selected) >= top_k:
+            break
+        if final_use < DEFAULT_MULTI_MEMORY_CONFIDENCE:
+            break
+        if (top_final_use - final_use) > DEFAULT_MULTI_MEMORY_MARGIN:
+            break
+        selected.append(memory)
+    return selected
 
 
 def _compute_negative_prototype(
@@ -773,7 +856,6 @@ def _apply_retrieval_thresholds(
     memories: list[ClusterMemory],
     episodes: list[EpisodeRecord],
 ) -> None:
-    max_reuse = max((memory.reuse_count for memory in memories), default=0)
     episode_by_id = {episode.episode_id: episode for episode in episodes}
     for memory in memories:
         positive_examples = [
@@ -787,11 +869,10 @@ def _apply_retrieval_thresholds(
             continue
 
         positive_scores = [
-            score_memory_use(
+            compute_applicability(
                 memory,
                 np.asarray(episode.task_embedding, dtype=np.float32),
                 episode.prompt,
-                max_reuse=max_reuse,
             )
             for episode in positive_examples
         ]
@@ -802,11 +883,10 @@ def _apply_retrieval_thresholds(
         ]
         negative_scores = sorted(
             (
-                score_memory_use(
+                compute_applicability(
                     memory,
                     np.asarray(episode.task_embedding, dtype=np.float32),
                     episode.prompt,
-                    max_reuse=max_reuse,
                 )
                 for episode in negative_pool
             ),
@@ -1112,14 +1192,43 @@ def _recompute_q_values(memories: list[ClusterMemory]) -> None:
             memory.transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
         memory.promotion_score = score_memory_promotion(memory, max_support=max_support)
         memory.q_value = memory.promotion_score
-        if not memory.distilled_patch_ids or memory.distillation_success <= 0:
-            memory.retrievable = False
-            continue
-        if (
+
+
+def _apply_sleep_promotion_policies(
+    memories: list[ClusterMemory],
+    *,
+    prune: bool,
+) -> list[ClusterMemory]:
+    retained: list[ClusterMemory] = []
+    for memory in memories:
+        has_patch = bool(memory.distilled_patch_ids) and memory.distillation_success > 0
+        harmful_transfer = (
             memory.unseen_hurt_count >= 2
             and memory.unseen_hurt_count > memory.unseen_help_count
-        ):
-            memory.retrievable = False
+        )
+        preserve_harm = (
+            memory.online_hurt_rate >= 0.60
+            or memory.utility_regression >= 0.35
+            or harmful_transfer
+        )
+        should_promote = (
+            has_patch
+            and memory.promotion_score >= DEFAULT_SLEEP_PROMOTE_MIN_SCORE
+            and memory.support_count >= DEFAULT_SLEEP_PROMOTE_MIN_SUPPORT
+            and not preserve_harm
+        )
+        memory.retrievable = should_promote
+
+        should_prune = (
+            prune
+            and memory.promotion_score <= DEFAULT_SLEEP_PRUNE_MAX_SCORE
+            and memory.support_count < DEFAULT_SLEEP_PROMOTE_MIN_SUPPORT
+            and preserve_harm
+        )
+        if should_prune:
+            continue
+        retained.append(memory)
+    return retained
 
 
 def _make_episode_id(task_id: str, prompt: str, failed_code: str, passed_code: str) -> str:
