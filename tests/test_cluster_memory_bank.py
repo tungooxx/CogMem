@@ -226,6 +226,35 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
     assert selected[0].memory_id == "memory_sort"
 
 
+def test_retrievable_payload_groups_metadata_evidence_and_transfer_stats():
+    memory = ClusterMemory(
+        memory_id="memory_transfer",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        negative_episode_ids=["ep9"],
+        positive_prototype=[1.0, 0.0],
+        negative_prototype=[0.0, 1.0],
+        structural_markers=["sorted", "mutation"],
+        local_support_gain=0.6,
+        held_out_steering_gain=0.5,
+        transfer_gain=0.4,
+        distilled_patch_ids=["patch_transfer"],
+        retrieval_threshold=0.3,
+    )
+
+    payload = memory.retrievable_payload()
+
+    assert set(payload) == {"cluster_metadata", "evidence", "transfer_stats", "patch_ids"}
+    assert payload["cluster_metadata"]["memory_id"] == "memory_transfer"
+    assert payload["evidence"]["negative_episode_ids"] == ["ep9"]
+    assert payload["transfer_stats"]["local_support_gain"] == 0.6
+    assert payload["patch_ids"] == ["patch_transfer"]
+
+
 def test_redundancy_penalty_hits_near_duplicate_memories():
     memories = [
         ClusterMemory(
@@ -296,6 +325,30 @@ def test_q_value_penalizes_unseen_hurt():
     _recompute_q_values([safe, risky])
 
     assert safe.q_value > risky.q_value
+
+
+def test_unseen_hurt_demotes_memory_from_retrieval():
+    risky = ClusterMemory(
+        memory_id="m_risky",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep4", "ep5", "ep6"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_risky"],
+        distillation_success=1.0,
+        local_support_gain=0.8,
+        held_out_steering_gain=0.8,
+        transfer_gain=0.7,
+        unseen_help_count=0,
+        unseen_hurt_count=2,
+        retrievable=True,
+    )
+
+    _recompute_q_values([risky])
+
+    assert risky.retrievable is False
 
 
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):

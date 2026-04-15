@@ -38,6 +38,11 @@ The current code now models this with:
 - `negative_prototype`: hard negatives near the cluster boundary
 - `structural_markers`: lightweight repair/applicability cues from episode prompts
 - `retrieval_threshold`: per-memory abstention gate
+- retrievable memory payload grouped as:
+  - `cluster_metadata`
+  - `evidence`
+  - `transfer_stats`
+  - `patch_ids`
 
 ### Q-value
 
@@ -71,3 +76,20 @@ That is the difference between recall and skill.
 2. Store cluster-level support, not only source task id.
 3. Add an abstention threshold to every memory.
 4. Make Q punish unseen hurt, not just reward seen gain.
+
+## Current Transfer-Aware Q Shape
+
+The intended utility is no longer "generic usefulness". It is transfer-aware
+utility:
+
+`Q(m) = a * local_gain + b * heldout_gain + c * transfer_gain - d * unseen_hurt - e * redundancy`
+
+Operationally this means a memory should score highly only if it:
+
+- helps on support tasks
+- helps on held-out similar tasks
+- does not hurt confusing nearby tasks
+- is not redundant with other memories
+
+And if a memory helps seen tasks but repeatedly hurts unseen tasks, it should be
+demoted or stop being retrievable.

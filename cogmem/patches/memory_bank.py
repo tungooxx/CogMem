@@ -92,9 +92,11 @@ class ClusterMemory:
     structural_markers: list[str] = field(default_factory=list)
     top_contrast_directions: list[list[float]] = field(default_factory=list)
     explained_variance: list[float] = field(default_factory=list)
+    local_support_gain: float = 0.0
     held_out_steering_gain: float = 0.0
     negative_steering_penalty: float = 0.0
     transfer_rate: float = 0.0
+    transfer_gain: float = 0.0
     distillation_success: float = 0.0
     reuse_count: int = 0
     seen_help_count: int = 0
@@ -117,6 +119,45 @@ class ClusterMemory:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ClusterMemory":
         return cls(**raw)
+
+    def retrievable_payload(self) -> dict[str, Any]:
+        """Return the transfer-facing memory record used at retrieval time."""
+        return {
+            "cluster_metadata": {
+                "memory_id": self.memory_id,
+                "family_label": self.family_label,
+                "support_count": self.support_count,
+                "layer_window": list(self.layer_window),
+                "token_window": self.token_window,
+                "centroid_embedding": list(self.centroid_embedding),
+                "positive_prototype": list(self.positive_prototype),
+                "negative_prototype": list(self.negative_prototype),
+                "retrieval_threshold": self.retrieval_threshold,
+                "q_value": self.q_value,
+                "retrievable": self.retrievable,
+            },
+            "evidence": {
+                "member_episode_ids": list(self.member_episode_ids),
+                "negative_episode_ids": list(self.negative_episode_ids),
+                "structural_markers": list(self.structural_markers),
+                "top_contrast_directions": list(self.top_contrast_directions),
+                "explained_variance": list(self.explained_variance),
+            },
+            "transfer_stats": {
+                "local_support_gain": self.local_support_gain,
+                "held_out_gain": self.held_out_steering_gain,
+                "transfer_rate": self.transfer_rate,
+                "transfer_gain": self.transfer_gain,
+                "negative_steering_penalty": self.negative_steering_penalty,
+                "seen_help_count": self.seen_help_count,
+                "seen_hurt_count": self.seen_hurt_count,
+                "unseen_help_count": self.unseen_help_count,
+                "unseen_hurt_count": self.unseen_hurt_count,
+                "redundancy_penalty": self.redundancy_penalty,
+                "utility_regression": self.utility_regression,
+            },
+            "patch_ids": list(self.distilled_patch_ids),
+        }
 
 
 class ClusterMemoryBank:
@@ -786,6 +827,16 @@ def _distill_and_score_memory(
         )
         for episode in holdout_eps
     ]
+    local_gains = [
+        _measure_patch_teacher_forcing_gain(
+            base_model,
+            tokenizer,
+            patch,
+            episode.prompt,
+            episode.passed_code,
+        )
+        for episode in train_eps
+    ]
     control_gains = [
         _measure_patch_teacher_forcing_gain(
             base_model,
@@ -801,12 +852,18 @@ def _distill_and_score_memory(
         )
     ]
 
+    memory.local_support_gain = float(np.mean(local_gains)) if local_gains else 0.0
     memory.held_out_steering_gain = float(np.mean(holdout_gains)) if holdout_gains else 0.0
     memory.transfer_rate = float(np.mean([gain > 0 for gain in holdout_gains])) if holdout_gains else 0.0
+    positive_holdout = [max(gain, 0.0) for gain in holdout_gains]
+    memory.transfer_gain = float(np.mean(positive_holdout)) if positive_holdout else 0.0
     harms = [max(-gain, 0.0) for gain in control_gains]
     memory.negative_steering_penalty = float(np.mean(harms)) if harms else 0.0
     memory.distillation_success = 1.0 if (
-        memory.held_out_steering_gain > 0 and memory.transfer_rate >= 0.5
+        memory.local_support_gain > 0
+        and memory.held_out_steering_gain > 0
+        and memory.transfer_rate >= 0.5
+        and memory.negative_steering_penalty <= 0.1
     ) else 0.0
     if memory.distillation_success > 0:
         memory.distilled_patch_ids = [patch.patch_id]
@@ -921,19 +978,37 @@ def _recompute_q_values(memories: list[ClusterMemory]) -> None:
             if total_transfer_outcomes
             else 0.0
         )
+        positive_transfer_outcomes = memory.seen_help_count + memory.unseen_help_count
+        negative_transfer_outcomes = memory.seen_hurt_count + memory.unseen_hurt_count
+        if total_transfer_outcomes:
+            memory.transfer_gain = positive_transfer_outcomes / total_transfer_outcomes
+        else:
+            memory.transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
+
+        local_gain = float(np.clip(memory.local_support_gain, 0.0, 1.0))
+        heldout_gain = float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
+        transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
         q = (
-            0.30 * memory.held_out_steering_gain
-            + 0.25 * memory.transfer_rate
-            + 0.15 * normalized_reuse
+            0.22 * local_gain
+            + 0.23 * heldout_gain
+            + 0.20 * transfer_gain
             + 0.05 * memory.distillation_success
             + 0.05 * memory.recency_score
             + 0.05 * seen_help_rate
+            + 0.05 * normalized_reuse
             - 0.10 * memory.utility_regression
+            - 0.10 * memory.negative_steering_penalty
             - 0.10 * memory.redundancy_penalty
             - 0.15 * unseen_hurt_rate
         )
         memory.q_value = float(np.clip(q, 0.0, 1.0))
         if not memory.distilled_patch_ids or memory.distillation_success <= 0:
+            memory.retrievable = False
+            continue
+        if (
+            memory.unseen_hurt_count >= 2
+            and memory.unseen_hurt_count > memory.unseen_help_count
+        ):
             memory.retrievable = False
 
 
