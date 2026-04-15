@@ -242,6 +242,8 @@ class ClusterMemoryBank:
                 ep for ep in self.episodes
                 if ep.success and ep.passed_code.strip() and ep.failed_code.strip()
             ]
+            if not eligible:
+                return self.stats()
             eligible_episode_ids = {episode.episode_id for episode in eligible}
             groups = _cluster_episodes(eligible, similarity_threshold, min_support)
 
@@ -405,6 +407,12 @@ class ClusterMemoryBank:
 
             _apply_recency_scores(self.memories)
             _recompute_q_values(self.memories)
+            eligible = [
+                episode for episode in self.episodes
+                if episode.success and episode.passed_code.strip() and episode.failed_code.strip()
+            ]
+            if eligible:
+                _apply_retrieval_thresholds(self.memories, eligible)
             if persist:
                 self.save()
 
@@ -488,6 +496,10 @@ class ClusterMemoryBank:
                 memory.q_value = existing.q_value
                 memory.reuse_count = existing.reuse_count
                 memory.last_used_at = existing.last_used_at
+                memory.seen_help_count = existing.seen_help_count
+                memory.seen_hurt_count = existing.seen_hurt_count
+                memory.unseen_help_count = existing.unseen_help_count
+                memory.unseen_hurt_count = existing.unseen_hurt_count
                 memory.utility_regression = existing.utility_regression
                 memory.created_at = existing.created_at
             merged.append(memory)

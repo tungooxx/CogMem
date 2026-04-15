@@ -137,11 +137,11 @@ utility:
 
 The current implementation uses:
 
-`Q(m) = 0.22 * local_support_gain + 0.23 * held_out_steering_gain + 0.20 * transfer_gain`
-
-`      + 0.05 * distillation_success + 0.05 * recency_score + 0.05 * seen_help_rate + 0.05 * normalized_reuse`
-
-`      - 0.10 * utility_regression - 0.10 * negative_steering_penalty - 0.10 * redundancy_penalty - 0.15 * unseen_hurt_rate`
+```text
+Q(m) = 0.22 * local_support_gain + 0.23 * held_out_steering_gain + 0.20 * transfer_gain
+     + 0.05 * distillation_success + 0.05 * recency_score + 0.05 * seen_help_rate + 0.05 * normalized_reuse
+     - 0.10 * utility_regression - 0.10 * negative_steering_penalty - 0.10 * redundancy_penalty - 0.15 * unseen_hurt_rate
+```
 
 And a memory is demoted from retrieval if:
 
