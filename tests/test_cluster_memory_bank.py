@@ -7,6 +7,7 @@ from cogmem.patches.memory_bank import (
     ClusterMemory,
     ClusterMemoryBank,
     _apply_redundancy_penalties,
+    _recompute_q_values,
     compute_top_contrast_directions,
 )
 from cogmem.patches.patch import CognitivePatch
@@ -47,6 +48,38 @@ def test_cluster_memory_bank_save_roundtrip(tmp_path):
     assert loaded.episodes[0].task_id == "BigCodeBench/1"
     assert len(loaded.memories) == 1
     assert loaded.memories[0].family_label == "plotting"
+
+
+def test_build_memories_keeps_existing_bank_when_no_eligible_episodes(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    bank.record_episode(
+        task_id="BigCodeBench/1",
+        prompt="plot a histogram",
+        task_embedding=[0.1, 0.2, 0.3],
+        failed_code="",
+        passed_code="print('pass')",
+        pass_fail_similarity=0.0,
+        success=False,
+    )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_existing",
+            family_label="plotting",
+            centroid_embedding=[0.1, 0.2, 0.3],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            q_value=0.5,
+        )
+    ]
+    before_stats = bank.stats()
+
+    stats = bank.build_memories(_dummy_model(), tokenizer=None)
+
+    assert stats == before_stats
+    assert len(bank.memories) == 1
+    assert bank.memories[0].memory_id == "memory_existing"
 
 
 def test_compute_top_contrast_directions_prefers_dominant_axis():
@@ -142,6 +175,118 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
     assert selected[0].memory_id == "memory_high"
 
 
+def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    bank.artifact_bank.add(
+        CognitivePatch(
+            patch_id="patch_low",
+            embedding=[0.0, 0.0],
+            lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+        )
+    )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_low_gate",
+            family_label="networking",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            negative_prototype=[0.95, 0.05],
+            distilled_patch_ids=["patch_low"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.10,
+            retrieval_threshold=0.35,
+        ),
+    ]
+
+    selected = bank.get_active_memories([0.95, 0.05], "open a socket on a url", top_k=1)
+
+    assert selected == []
+
+
+def test_structural_match_can_break_similarity_tie(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    for patch_id in ("patch_sort", "patch_plot"):
+        bank.artifact_bank.add(
+            CognitivePatch(
+                patch_id=patch_id,
+                embedding=[0.0, 0.0],
+                lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+            )
+        )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_sort",
+            family_label="general_code",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            structural_markers=["sorted", "mutation"],
+            distilled_patch_ids=["patch_sort"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.5,
+        ),
+        ClusterMemory(
+            memory_id="memory_plot",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            structural_markers=["histogram", "matplotlib"],
+            distilled_patch_ids=["patch_plot"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.5,
+        ),
+    ]
+
+    selected = bank.get_active_memories(
+        [1.0, 0.0],
+        "return a sorted copy without mutating the input list",
+        top_k=1,
+    )
+
+    assert selected[0].memory_id == "memory_sort"
+
+
+def test_retrievable_payload_groups_metadata_evidence_and_transfer_stats():
+    memory = ClusterMemory(
+        memory_id="memory_transfer",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        negative_episode_ids=["ep9"],
+        positive_prototype=[1.0, 0.0],
+        negative_prototype=[0.0, 1.0],
+        structural_markers=["sorted", "mutation"],
+        local_support_gain=0.6,
+        held_out_steering_gain=0.5,
+        transfer_gain=0.4,
+        distilled_patch_ids=["patch_transfer"],
+        retrieval_threshold=0.3,
+    )
+
+    payload = memory.retrievable_payload()
+
+    assert set(payload) == {"cluster_metadata", "evidence", "transfer_stats", "patch_ids"}
+    assert payload["cluster_metadata"]["memory_id"] == "memory_transfer"
+    assert payload["evidence"]["negative_episode_ids"] == ["ep9"]
+    assert payload["transfer_stats"]["local_support_gain"] == 0.6
+    assert payload["patch_ids"] == ["patch_transfer"]
+
+
 def test_redundancy_penalty_hits_near_duplicate_memories():
     memories = [
         ClusterMemory(
@@ -178,6 +323,145 @@ def test_redundancy_penalty_hits_near_duplicate_memories():
     assert memories[0].redundancy_penalty > 0.8
     assert memories[1].redundancy_penalty > 0.8
     assert memories[2].redundancy_penalty == 0.0
+
+
+def test_q_value_penalizes_unseen_hurt():
+    safe = ClusterMemory(
+        memory_id="m_safe",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_safe"],
+        distillation_success=1.0,
+        held_out_steering_gain=0.4,
+        transfer_rate=0.8,
+    )
+    risky = ClusterMemory(
+        memory_id="m_risky",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep4", "ep5", "ep6"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_risky"],
+        distillation_success=1.0,
+        held_out_steering_gain=0.4,
+        transfer_rate=0.8,
+        unseen_hurt_count=3,
+    )
+
+    _recompute_q_values([safe, risky])
+
+    assert safe.q_value > risky.q_value
+
+
+def test_merge_memories_preserves_transfer_counters(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="general_code",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            seen_help_count=2,
+            seen_hurt_count=1,
+            unseen_help_count=3,
+            unseen_hurt_count=4,
+        )
+    ]
+    merged = bank._merge_memories(
+        [
+            ClusterMemory(
+                memory_id="memory_a",
+                family_label="general_code",
+                centroid_embedding=[1.0, 0.0],
+                member_episode_ids=["ep1", "ep2", "ep3"],
+                support_count=3,
+                layer_window=[4, 5, 6, 7],
+                token_window=64,
+            )
+        ],
+        {"ep1", "ep2", "ep3"},
+    )
+
+    assert merged[0].seen_help_count == 2
+    assert merged[0].seen_hurt_count == 1
+    assert merged[0].unseen_help_count == 3
+    assert merged[0].unseen_hurt_count == 4
+
+
+def test_unseen_hurt_demotes_memory_from_retrieval():
+    risky = ClusterMemory(
+        memory_id="m_risky",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep4", "ep5", "ep6"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_risky"],
+        distillation_success=1.0,
+        local_support_gain=0.8,
+        held_out_steering_gain=0.8,
+        transfer_gain=0.7,
+        unseen_help_count=0,
+        unseen_hurt_count=2,
+        retrievable=True,
+    )
+
+    _recompute_q_values([risky])
+
+    assert risky.retrievable is False
+
+
+def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    episode = bank.record_episode(
+        task_id="BigCodeBench/1",
+        prompt="plot a histogram",
+        task_embedding=[1.0, 0.0],
+        failed_code="fail",
+        passed_code="pass",
+        pass_fail_similarity=0.8,
+    )
+    bank.record_episode(
+        task_id="BigCodeBench/2",
+        prompt="open a socket and check a port",
+        task_embedding=[0.0, 1.0],
+        failed_code="fail",
+        passed_code="pass",
+        pass_fail_similarity=0.8,
+    )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_plot",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=[episode.episode_id],
+            support_count=1,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            negative_prototype=[0.0, 1.0],
+            distilled_patch_ids=["patch_plot"],
+            distillation_success=1.0,
+            retrievable=True,
+            q_value=0.1,
+            retrieval_threshold=0.0,
+        )
+    ]
+    bank._memory_index = {"memory_plot": 0}
+
+    bank.update_memory_utility("memory_plot", task_succeeded=True, persist=False)
+
+    assert bank.memories[0].retrieval_threshold != 0.0
 
 
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):
