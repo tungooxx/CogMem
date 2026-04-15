@@ -31,13 +31,11 @@ support, and transfer-aware Q.
   - `evidence`
   - `transfer_stats`
   - `patch_ids`
-- Retrieval uses a gated score:
-  - positive prototype similarity
-  - minus negative prototype similarity
-  - plus transfer-aware Q
-  - plus structural match
+- Retrieval now separates:
+  - durable promotion trust
+  - query-time applicability and use trust
 - Every memory has an abstention boundary through `retrieval_threshold`.
-- Q is now transfer-aware, so unseen hurt can lower Q and eventually disable retrieval.
+- Promotion score is transfer-aware, so unseen hurt can lower trust and eventually disable retrieval.
 
 ## What Changed
 
@@ -54,29 +52,45 @@ support, and transfer-aware Q.
 
 Retrieval should not be "nearest prompt embedding wins".
 
-Use a gated score:
+Use a gated applicability score plus a separate query-time use score:
 
-`RetrieveScore(m, q) = w1 * sim(q, pos_prototype_m) - w2 * sim(q, neg_prototype_m) + w3 * Q_m + w4 * structural_match(q, m)`
+`applicability(m, q) = w1 * sim(q, pos_prototype_m) - w2 * sim(q, neg_prototype_m) + w3 * structural_match(q, m)`
 
-Only retrieve when:
+`Q_use(m, q) = applicability(m, q) * (u1 * transfer_gain + u2 * recent_success + u3 * reuse - u4 * online_hurt)`
 
-`RetrieveScore(m, q) > tau_m`
+Only retrieve when `Q_use(m, q)` clears the memory's threshold.
 
 ### Current code formula
 
 The current implementation uses:
 
-`RetrieveScore(m, q) = 0.45 * sim(q, pos_prototype_m) - 0.20 * sim(q, neg_prototype_m) + 0.25 * Q_m + 0.10 * structural_match(q, m)`
+```text
+applicability(m, q) = clip(
+    0.60 * sim(q, pos_prototype_m)
+  - 0.25 * sim(q, neg_prototype_m)
+  + 0.15 * structural_match(q, m),
+  0, 1
+)
+
+Q_use(m, q) = applicability(m, q) * clip(
+    0.45 * transfer_gain
+  + 0.20 * recent_success_rate
+  + 0.15 * log_reuse
+  - 0.20 * online_hurt_rate,
+  0, 1
+)
+```
 
 Where:
 
 - `pos_prototype_m` is the memory centroid / positive prototype
 - `neg_prototype_m` is a small hard-negative pool near the cluster boundary
 - `structural_match(q, m)` mixes prompt marker overlap with family match
+- `log_reuse` is `log(1 + reuse_count)` normalized by the largest reuse count in the bank
 
 The current gate is:
 
-- retrieve only if `RetrieveScore(m, q) > retrieval_threshold_m`
+- retrieve only if `Q_use(m, q) > retrieval_threshold_m`
 - `retrieval_threshold_m` is set from the midpoint between:
   - the 25th percentile of positive example scores
   - the 85th percentile of negative-pool scores
@@ -87,6 +101,9 @@ The current code now models this with:
 - `negative_prototype`: hard negatives near the cluster boundary
 - `structural_markers`: lightweight repair/applicability cues from episode prompts
 - `retrieval_threshold`: per-memory abstention gate
+- `promotion_score`: durable trust for promotion / demotion decisions
+- `recent_success_rate`: online recency-weighted usefulness signal
+- `online_hurt_rate`: online recency-weighted harm signal
 - retrievable memory payload grouped as:
   - `cluster_metadata`
   - `evidence`
@@ -95,13 +112,12 @@ The current code now models this with:
 
 ### Q-value
 
-Q should not only reward held-out or seen-side fit.
+One scalar should not do every job.
 
-Q should also punish transfer failures, especially:
+The system now separates:
 
-- unseen-task hurt
-- repeated misuse
-- redundant broad memories
+- `Q_promote(m)`: should this memory stay trusted, merge, or be demoted?
+- `Q_use(m, q)`: should this memory fire on this query right now?
 
 ## Why This Improves Transfer
 
@@ -128,20 +144,30 @@ That is the difference between recall and skill.
 
 ## Current Transfer-Aware Q Shape
 
-The intended utility is no longer "generic usefulness". It is transfer-aware
-utility:
+The intended durable utility is no longer "generic usefulness". It is a
+promotion score built from transfer evidence, support, and harm:
 
-`Q(m) = a * local_gain + b * heldout_gain + c * transfer_gain - d * unseen_hurt - e * redundancy`
+`Q_promote(m) = a * heldout_gain + b * transfer_gain + c * local_support_gain + d * support - e * harm - f * redundancy`
 
 ### Current code formula
 
 The current implementation uses:
 
 ```text
-Q(m) = 0.22 * local_support_gain + 0.23 * held_out_steering_gain + 0.20 * transfer_gain
-     + 0.05 * distillation_success + 0.05 * recency_score + 0.05 * seen_help_rate + 0.05 * normalized_reuse
-     - 0.10 * utility_regression - 0.10 * negative_steering_penalty - 0.10 * redundancy_penalty - 0.15 * unseen_hurt_rate
+Q_promote(m) = 0.30 * held_out_steering_gain
+             + 0.25 * transfer_gain
+             + 0.15 * local_support_gain
+             + 0.10 * distillation_success
+             + 0.10 * log_support
+             - 0.15 * utility_regression
+             - 0.15 * unseen_hurt_rate
+             - 0.10 * redundancy_penalty
 ```
+
+Where:
+
+- `log_support` is `log(1 + support_count)` normalized by the largest support count in the bank
+- legacy `q_value` metadata now mirrors `promotion_score` for compatibility with saved patch artifacts
 
 And a memory is demoted from retrieval if:
 
@@ -152,6 +178,7 @@ Operationally this means a memory should score highly only if it:
 
 - helps on support tasks
 - helps on held-out similar tasks
+- carries enough repeated support to be worth keeping
 - does not hurt confusing nearby tasks
 - is not redundant with other memories
 

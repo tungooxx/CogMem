@@ -9,6 +9,7 @@ from cogmem.patches.memory_bank import (
     _apply_redundancy_penalties,
     _recompute_q_values,
     compute_top_contrast_directions,
+    score_memory_use,
 )
 from cogmem.patches.patch import CognitivePatch
 
@@ -128,7 +129,7 @@ def test_active_patches_skip_non_retrievable_memories(tmp_path):
     assert active == []
 
 
-def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
+def test_retrieval_prefers_higher_use_score_when_similarity_is_close(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     for patch_id in ("patch_hi", "patch_lo"):
         bank.artifact_bank.add(
@@ -151,7 +152,8 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_lo"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.10,
+            transfer_gain=0.10,
+            recent_success_rate=0.10,
         ),
         ClusterMemory(
             memory_id="memory_high",
@@ -164,7 +166,8 @@ def test_retrieval_prefers_higher_q_when_similarity_is_close(tmp_path):
             distilled_patch_ids=["patch_hi"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.90,
+            transfer_gain=0.90,
+            recent_success_rate=0.90,
         ),
     ]
     bank.save()
@@ -198,7 +201,8 @@ def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
             distilled_patch_ids=["patch_low"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.10,
+            transfer_gain=0.9,
+            recent_success_rate=0.9,
             retrieval_threshold=0.35,
         ),
     ]
@@ -231,7 +235,8 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
             distilled_patch_ids=["patch_sort"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.5,
+            transfer_gain=0.6,
+            recent_success_rate=0.6,
         ),
         ClusterMemory(
             memory_id="memory_plot",
@@ -245,7 +250,8 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
             distilled_patch_ids=["patch_plot"],
             distillation_success=1.0,
             retrievable=True,
-            q_value=0.5,
+            transfer_gain=0.6,
+            recent_success_rate=0.6,
         ),
     ]
 
@@ -325,7 +331,7 @@ def test_redundancy_penalty_hits_near_duplicate_memories():
     assert memories[2].redundancy_penalty == 0.0
 
 
-def test_q_value_penalizes_unseen_hurt():
+def test_promotion_score_penalizes_unseen_hurt():
     safe = ClusterMemory(
         memory_id="m_safe",
         family_label="general_code",
@@ -356,6 +362,7 @@ def test_q_value_penalizes_unseen_hurt():
 
     _recompute_q_values([safe, risky])
 
+    assert safe.promotion_score > risky.promotion_score
     assert safe.q_value > risky.q_value
 
 
@@ -462,6 +469,49 @@ def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
     bank.update_memory_utility("memory_plot", task_succeeded=True, persist=False)
 
     assert bank.memories[0].retrieval_threshold != 0.0
+
+
+def test_load_patches_for_memories_uses_query_time_use_score(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    patch = CognitivePatch(
+        patch_id="patch_plot",
+        embedding=[1.0, 0.0],
+        lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+    )
+    bank.artifact_bank.add(patch)
+    memory = ClusterMemory(
+        memory_id="memory_plot",
+        family_label="plotting",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        structural_markers=["histogram"],
+        distilled_patch_ids=["patch_plot"],
+        distillation_success=1.0,
+        retrievable=True,
+        promotion_score=0.9,
+        transfer_gain=0.5,
+        recent_success_rate=0.5,
+    )
+    bank.memories = [memory]
+
+    loaded = bank.load_patches_for_memories(
+        [memory],
+        query_embedding=[1.0, 0.0],
+        task_prompt="plot a histogram",
+    )
+
+    assert len(loaded) == 1
+    expected = score_memory_use(
+        memory,
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        "plot a histogram",
+        max_reuse=0,
+    )
+    assert loaded[0].q_value == expected
+    assert loaded[0].q_value != memory.promotion_score
 
 
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):

@@ -38,10 +38,13 @@ DEFAULT_TOKEN_WINDOW = 64
 DEFAULT_TOP_DIRECTIONS = 3
 DEFAULT_CONTROL_EPISODES = 3
 DEFAULT_PATCH_SCALE = 0.25
-DEFAULT_RETRIEVE_POS_WEIGHT = 0.45
-DEFAULT_RETRIEVE_NEG_WEIGHT = 0.20
-DEFAULT_RETRIEVE_Q_WEIGHT = 0.25
-DEFAULT_RETRIEVE_STRUCT_WEIGHT = 0.10
+DEFAULT_APPLICABILITY_POS_WEIGHT = 0.60
+DEFAULT_APPLICABILITY_NEG_WEIGHT = 0.25
+DEFAULT_APPLICABILITY_STRUCT_WEIGHT = 0.15
+DEFAULT_USE_TRANSFER_WEIGHT = 0.45
+DEFAULT_USE_RECENT_SUCCESS_WEIGHT = 0.20
+DEFAULT_USE_REUSE_WEIGHT = 0.15
+DEFAULT_USE_ONLINE_HURT_WEIGHT = 0.20
 DEFAULT_RETRIEVE_NEGATIVE_POOL = 8
 DEFAULT_RETRIEVE_MARKERS = 8
 STOPWORDS = {
@@ -106,12 +109,22 @@ class ClusterMemory:
     recency_score: float = 0.0
     utility_regression: float = 0.0
     redundancy_penalty: float = 0.0
+    promotion_score: float = 0.0
+    recent_success_rate: float = 0.0
+    online_hurt_rate: float = 0.0
     q_value: float = 0.0
     retrieval_threshold: float = 0.0
     distilled_patch_ids: list[str] = field(default_factory=list)
     retrievable: bool = False
     created_at: float = field(default_factory=time.time)
     last_used_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        # Keep legacy q_value metadata readable after the promotion/use split.
+        if self.promotion_score <= 0.0 and self.q_value > 0.0:
+            self.promotion_score = self.q_value
+        elif self.q_value <= 0.0 and self.promotion_score > 0.0:
+            self.q_value = self.promotion_score
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,6 +146,7 @@ class ClusterMemory:
                 "positive_prototype": list(self.positive_prototype),
                 "negative_prototype": list(self.negative_prototype),
                 "retrieval_threshold": self.retrieval_threshold,
+                "promotion_score": self.promotion_score,
                 "q_value": self.q_value,
                 "retrievable": self.retrievable,
             },
@@ -153,6 +167,8 @@ class ClusterMemory:
                 "seen_hurt_count": self.seen_hurt_count,
                 "unseen_help_count": self.unseen_help_count,
                 "unseen_hurt_count": self.unseen_hurt_count,
+                "recent_success_rate": self.recent_success_rate,
+                "online_hurt_rate": self.online_hurt_rate,
                 "redundancy_penalty": self.redundancy_penalty,
                 "utility_regression": self.utility_regression,
             },
@@ -330,12 +346,18 @@ class ClusterMemoryBank:
             return []
 
         query = np.asarray(query_embedding, dtype=np.float32)
+        max_reuse = max((memory.reuse_count for memory in self.memories), default=0)
         scored: list[tuple[float, ClusterMemory]] = []
 
         for memory in self.memories:
             if not memory.retrievable or not memory.distilled_patch_ids:
                 continue
-            score = score_memory_retrieval(memory, query, task_prompt)
+            score = score_memory_use(
+                memory,
+                query,
+                task_prompt,
+                max_reuse=max_reuse,
+            )
             if score <= memory.retrieval_threshold:
                 continue
             scored.append((score, memory))
@@ -351,7 +373,11 @@ class ClusterMemoryBank:
         return_memories: bool = False,
     ) -> list[CognitivePatch] | tuple[list[ClusterMemory], list[CognitivePatch]]:
         memories = self.get_active_memories(query_embedding, task_prompt, top_k=top_k)
-        patches = self.load_patches_for_memories(memories)
+        patches = self.load_patches_for_memories(
+            memories,
+            query_embedding=query_embedding,
+            task_prompt=task_prompt,
+        )
         if return_memories:
             return memories, patches
         return patches
@@ -359,9 +385,17 @@ class ClusterMemoryBank:
     def load_patches_for_memories(
         self,
         memories: list[ClusterMemory],
+        query_embedding: list[float] | None = None,
+        task_prompt: str = "",
     ) -> list[CognitivePatch]:
         active: list[CognitivePatch] = []
         seen: set[str] = set()
+        query = (
+            np.asarray(query_embedding, dtype=np.float32)
+            if query_embedding is not None
+            else None
+        )
+        max_reuse = max((memory.reuse_count for memory in self.memories), default=0)
         for memory in memories:
             for patch_id in memory.distilled_patch_ids:
                 if patch_id in seen:
@@ -370,7 +404,15 @@ class ClusterMemoryBank:
                 if patch is None:
                     continue
                 self._patch_bank.load_weights(patch)
-                patch.q_value = memory.q_value
+                if query is not None:
+                    patch.q_value = score_memory_use(
+                        memory,
+                        query,
+                        task_prompt,
+                        max_reuse=max_reuse,
+                    )
+                else:
+                    patch.q_value = memory.promotion_score
                 active.append(patch)
                 seen.add(patch_id)
         return active
@@ -391,6 +433,13 @@ class ClusterMemoryBank:
             memory = self.memories[idx]
             memory.reuse_count += 1
             memory.last_used_at = time.time()
+            observation = 1.0 if task_succeeded else 0.0
+            memory.recent_success_rate = float(
+                np.clip(0.8 * memory.recent_success_rate + 0.2 * observation, 0.0, 1.0)
+            )
+            memory.online_hurt_rate = float(
+                np.clip(0.8 * memory.online_hurt_rate + 0.2 * (1.0 - observation), 0.0, 1.0)
+            )
 
             if cold_succeeded is True and not task_succeeded:
                 memory.utility_regression = min(1.0, memory.utility_regression + 0.1)
@@ -493,6 +542,7 @@ class ClusterMemoryBank:
             if existing is None:
                 existing = existing_by_members.get(frozenset(memory.member_episode_ids))
             if existing is not None:
+                memory.promotion_score = existing.promotion_score
                 memory.q_value = existing.q_value
                 memory.reuse_count = existing.reuse_count
                 memory.last_used_at = existing.last_used_at
@@ -500,6 +550,8 @@ class ClusterMemoryBank:
                 memory.seen_hurt_count = existing.seen_hurt_count
                 memory.unseen_help_count = existing.unseen_help_count
                 memory.unseen_hurt_count = existing.unseen_hurt_count
+                memory.recent_success_rate = existing.recent_success_rate
+                memory.online_hurt_rate = existing.online_hurt_rate
                 memory.utility_regression = existing.utility_regression
                 memory.created_at = existing.created_at
             merged.append(memory)
@@ -591,7 +643,7 @@ def compute_structural_match(task_prompt: str, memory: ClusterMemory) -> float:
     return float(np.clip(0.7 * overlap + 0.3 * family_match, 0.0, 1.0))
 
 
-def score_memory_retrieval(
+def compute_applicability(
     memory: ClusterMemory,
     query_embedding: np.ndarray,
     task_prompt: str,
@@ -608,13 +660,84 @@ def score_memory_retrieval(
         negative_similarity = cosine_similarity(query_embedding, negative)
 
     structural_match = compute_structural_match(task_prompt, memory)
-    score = (
-        DEFAULT_RETRIEVE_POS_WEIGHT * positive_similarity
-        - DEFAULT_RETRIEVE_NEG_WEIGHT * negative_similarity
-        + DEFAULT_RETRIEVE_Q_WEIGHT * memory.q_value
-        + DEFAULT_RETRIEVE_STRUCT_WEIGHT * structural_match
+    applicability = (
+        DEFAULT_APPLICABILITY_POS_WEIGHT * positive_similarity
+        - DEFAULT_APPLICABILITY_NEG_WEIGHT * negative_similarity
+        + DEFAULT_APPLICABILITY_STRUCT_WEIGHT * structural_match
     )
-    return float(score)
+    return float(np.clip(applicability, 0.0, 1.0))
+
+
+def _normalized_log_score(value: int, max_value: int) -> float:
+    if value <= 0 or max_value <= 0:
+        return 0.0
+    return float(np.log1p(value) / max(np.log1p(max_value), 1e-8))
+
+
+def score_memory_promotion(
+    memory: ClusterMemory,
+    max_support: int,
+) -> float:
+    total_transfer_outcomes = (
+        memory.seen_help_count
+        + memory.seen_hurt_count
+        + memory.unseen_help_count
+        + memory.unseen_hurt_count
+    )
+    unseen_hurt_rate = (
+        memory.unseen_hurt_count / total_transfer_outcomes
+        if total_transfer_outcomes
+        else 0.0
+    )
+    support_score = _normalized_log_score(memory.support_count, max_support)
+    q = (
+        0.30 * float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
+        + 0.25 * float(np.clip(memory.transfer_gain, 0.0, 1.0))
+        + 0.15 * float(np.clip(memory.local_support_gain, 0.0, 1.0))
+        + 0.10 * float(np.clip(memory.distillation_success, 0.0, 1.0))
+        + 0.10 * support_score
+        - 0.15 * float(np.clip(memory.utility_regression, 0.0, 1.0))
+        - 0.15 * float(np.clip(unseen_hurt_rate, 0.0, 1.0))
+        - 0.10 * float(np.clip(memory.redundancy_penalty, 0.0, 1.0))
+    )
+    return float(np.clip(q, 0.0, 1.0))
+
+
+def score_memory_use(
+    memory: ClusterMemory,
+    query_embedding: np.ndarray,
+    task_prompt: str,
+    *,
+    max_reuse: int = 0,
+) -> float:
+    applicability = compute_applicability(memory, query_embedding, task_prompt)
+    reuse_score = _normalized_log_score(memory.reuse_count, max_reuse)
+    recent_success = float(
+        np.clip(
+            memory.recent_success_rate
+            if (memory.reuse_count > 0 or memory.recent_success_rate > 0.0)
+            else memory.transfer_gain,
+            0.0,
+            1.0,
+        )
+    )
+    trust_now = (
+        DEFAULT_USE_TRANSFER_WEIGHT * float(np.clip(memory.transfer_gain, 0.0, 1.0))
+        + DEFAULT_USE_RECENT_SUCCESS_WEIGHT * recent_success
+        + DEFAULT_USE_REUSE_WEIGHT * reuse_score
+        - DEFAULT_USE_ONLINE_HURT_WEIGHT * float(np.clip(memory.online_hurt_rate, 0.0, 1.0))
+    )
+    trust_now = float(np.clip(trust_now, 0.0, 1.0))
+    return float(np.clip(applicability * trust_now, 0.0, 1.0))
+
+
+def score_memory_retrieval(
+    memory: ClusterMemory,
+    query_embedding: np.ndarray,
+    task_prompt: str,
+) -> float:
+    """Backward-compatible alias for the query-time use score."""
+    return score_memory_use(memory, query_embedding, task_prompt, max_reuse=memory.reuse_count)
 
 
 def _compute_negative_prototype(
@@ -650,6 +773,7 @@ def _apply_retrieval_thresholds(
     memories: list[ClusterMemory],
     episodes: list[EpisodeRecord],
 ) -> None:
+    max_reuse = max((memory.reuse_count for memory in memories), default=0)
     episode_by_id = {episode.episode_id: episode for episode in episodes}
     for memory in memories:
         positive_examples = [
@@ -663,10 +787,11 @@ def _apply_retrieval_thresholds(
             continue
 
         positive_scores = [
-            score_memory_retrieval(
+            score_memory_use(
                 memory,
                 np.asarray(episode.task_embedding, dtype=np.float32),
                 episode.prompt,
+                max_reuse=max_reuse,
             )
             for episode in positive_examples
         ]
@@ -677,10 +802,11 @@ def _apply_retrieval_thresholds(
         ]
         negative_scores = sorted(
             (
-                score_memory_retrieval(
+                score_memory_use(
                     memory,
                     np.asarray(episode.task_embedding, dtype=np.float32),
                     episode.prompt,
+                    max_reuse=max_reuse,
                 )
                 for episode in negative_pool
             ),
@@ -970,25 +1096,13 @@ def _apply_redundancy_penalties(memories: list[ClusterMemory]) -> None:
 
 
 def _recompute_q_values(memories: list[ClusterMemory]) -> None:
-    max_reuse = max((memory.reuse_count for memory in memories), default=0)
-    norm_denom = max(max_reuse, 1)
+    max_support = max((memory.support_count for memory in memories), default=0)
     for memory in memories:
-        normalized_reuse = memory.reuse_count / norm_denom
         total_transfer_outcomes = (
             memory.seen_help_count
             + memory.seen_hurt_count
             + memory.unseen_help_count
             + memory.unseen_hurt_count
-        )
-        seen_help_rate = (
-            memory.seen_help_count / total_transfer_outcomes
-            if total_transfer_outcomes
-            else 0.0
-        )
-        unseen_hurt_rate = (
-            memory.unseen_hurt_count / total_transfer_outcomes
-            if total_transfer_outcomes
-            else 0.0
         )
         positive_transfer_outcomes = memory.seen_help_count + memory.unseen_help_count
         negative_transfer_outcomes = memory.seen_hurt_count + memory.unseen_hurt_count
@@ -996,24 +1110,8 @@ def _recompute_q_values(memories: list[ClusterMemory]) -> None:
             memory.transfer_gain = positive_transfer_outcomes / total_transfer_outcomes
         else:
             memory.transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
-
-        local_gain = float(np.clip(memory.local_support_gain, 0.0, 1.0))
-        heldout_gain = float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
-        transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
-        q = (
-            0.22 * local_gain
-            + 0.23 * heldout_gain
-            + 0.20 * transfer_gain
-            + 0.05 * memory.distillation_success
-            + 0.05 * memory.recency_score
-            + 0.05 * seen_help_rate
-            + 0.05 * normalized_reuse
-            - 0.10 * memory.utility_regression
-            - 0.10 * memory.negative_steering_penalty
-            - 0.10 * memory.redundancy_penalty
-            - 0.15 * unseen_hurt_rate
-        )
-        memory.q_value = float(np.clip(q, 0.0, 1.0))
+        memory.promotion_score = score_memory_promotion(memory, max_support=max_support)
+        memory.q_value = memory.promotion_score
         if not memory.distilled_patch_ids or memory.distillation_success <= 0:
             memory.retrievable = False
             continue
