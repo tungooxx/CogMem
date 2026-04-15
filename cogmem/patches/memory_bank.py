@@ -106,6 +106,7 @@ class ClusterMemory:
     negative_steering_penalty: float = 0.0
     transfer_rate: float = 0.0
     transfer_gain: float = 0.0
+    transfer_online_gain: float = 0.0
     distillation_success: float = 0.0
     reuse_count: int = 0
     seen_help_count: int = 0
@@ -168,6 +169,7 @@ class ClusterMemory:
                 "held_out_gain": self.held_out_steering_gain,
                 "transfer_rate": self.transfer_rate,
                 "transfer_gain": self.transfer_gain,
+                "transfer_online_gain": self.transfer_online_gain,
                 "negative_steering_penalty": self.negative_steering_penalty,
                 "seen_help_count": self.seen_help_count,
                 "seen_hurt_count": self.seen_hurt_count,
@@ -584,6 +586,7 @@ class ClusterMemoryBank:
                 memory.seen_hurt_count = existing.seen_hurt_count
                 memory.unseen_help_count = existing.unseen_help_count
                 memory.unseen_hurt_count = existing.unseen_hurt_count
+                memory.transfer_online_gain = existing.transfer_online_gain
                 memory.recent_success_rate = existing.recent_success_rate
                 memory.online_hurt_rate = existing.online_hurt_rate
                 memory.utility_regression = existing.utility_regression
@@ -726,7 +729,8 @@ def score_memory_promotion(
     support_score = _normalized_log_score(memory.support_count, max_support)
     q = (
         0.28 * float(np.clip(memory.held_out_steering_gain, 0.0, 1.0))
-        + 0.22 * float(np.clip(memory.transfer_gain, 0.0, 1.0))
+        + 0.16 * float(np.clip(memory.transfer_gain, 0.0, 1.0))
+        + 0.06 * float(np.clip(memory.transfer_online_gain, 0.0, 1.0))
         + 0.12 * float(np.clip(memory.local_support_gain, 0.0, 1.0))
         + 0.10 * float(np.clip(memory.distillation_success, 0.0, 1.0))
         + 0.08 * support_score
@@ -1185,11 +1189,12 @@ def _recompute_q_values(memories: list[ClusterMemory]) -> None:
             + memory.unseen_hurt_count
         )
         positive_transfer_outcomes = memory.seen_help_count + memory.unseen_help_count
-        negative_transfer_outcomes = memory.seen_hurt_count + memory.unseen_hurt_count
         if total_transfer_outcomes:
-            memory.transfer_gain = positive_transfer_outcomes / total_transfer_outcomes
+            memory.transfer_online_gain = float(
+                np.clip(positive_transfer_outcomes / total_transfer_outcomes, 0.0, 1.0)
+            )
         else:
-            memory.transfer_gain = float(np.clip(memory.transfer_gain, 0.0, 1.0))
+            memory.transfer_online_gain = float(np.clip(memory.transfer_online_gain, 0.0, 1.0))
         memory.promotion_score = score_memory_promotion(memory, max_support=max_support)
         memory.q_value = memory.promotion_score
 

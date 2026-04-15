@@ -123,6 +123,7 @@ The current code now models this with:
 - `promotion_score`: durable trust for promotion / demotion decisions
 - `recent_success_rate`: online recency-weighted usefulness signal
 - `online_hurt_rate`: online recency-weighted harm signal
+- `transfer_online_gain`: online success ratio from actual memory uses
 - retrievable memory payload grouped as:
   - `cluster_metadata`
   - `evidence`
@@ -179,7 +180,8 @@ The current implementation uses:
 
 ```text
 Q_promote(m) = 0.28 * held_out_steering_gain
-             + 0.22 * transfer_gain
+             + 0.16 * transfer_gain
+             + 0.06 * transfer_online_gain
              + 0.12 * local_support_gain
              + 0.10 * distillation_success
              + 0.08 * log_support
@@ -193,6 +195,8 @@ Q_promote(m) = 0.28 * held_out_steering_gain
 Where:
 
 - `log_support` is `log(1 + support_count)` normalized by the largest support count in the bank
+- `transfer_gain` remains the held-out distillation-time signal from cluster validation
+- `transfer_online_gain` is the online success ratio from seen/unseen help-hurt counters
 - legacy `q_value` metadata now mirrors `promotion_score` for compatibility with saved patch artifacts
 
 And a memory is demoted from retrieval if:

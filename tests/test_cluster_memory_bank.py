@@ -236,6 +236,59 @@ def test_default_retrieval_uses_top1_unless_confidence_is_very_high(tmp_path):
     assert len(selected) == 1
     assert selected[0].memory_id == "memory_a"
 
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_a"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.95,
+            recent_success_rate=0.95,
+            promotion_score=0.90,
+            reuse_count=10,
+            retrieval_threshold=0.40,
+        ),
+        ClusterMemory(
+            memory_id="memory_b",
+            family_label="plotting",
+            centroid_embedding=[0.999, 0.001],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[0.999, 0.001],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_b"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.94,
+            recent_success_rate=0.94,
+            promotion_score=0.89,
+            reuse_count=10,
+            retrieval_threshold=0.40,
+        ),
+    ]
+
+    from cogmem.patches import memory_bank as memory_bank_module
+    original_confidence = memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE
+    try:
+        memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE = 0.55
+        selected = bank.get_active_memories([1.0, 0.0], "plot a histogram", top_k=5)
+    finally:
+        memory_bank_module.DEFAULT_MULTI_MEMORY_CONFIDENCE = original_confidence
+
+    selected_ids = {memory.memory_id for memory in selected}
+    assert len(selected) > 1
+    assert {"memory_a", "memory_b"}.issubset(selected_ids)
+
 
 def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
@@ -423,6 +476,30 @@ def test_promotion_score_penalizes_unseen_hurt():
 
     assert safe.promotion_score > risky.promotion_score
     assert safe.q_value > risky.q_value
+
+
+def test_recompute_q_values_preserves_heldout_transfer_gain_and_tracks_online_gain():
+    memory = ClusterMemory(
+        memory_id="m_transfer",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        distilled_patch_ids=["patch_transfer"],
+        distillation_success=1.0,
+        transfer_gain=0.72,
+        seen_help_count=1,
+        seen_hurt_count=1,
+        unseen_help_count=1,
+        unseen_hurt_count=1,
+    )
+
+    _recompute_q_values([memory])
+
+    assert memory.transfer_gain == 0.72
+    assert memory.transfer_online_gain == 0.5
 
 
 def test_merge_memories_preserves_transfer_counters(tmp_path):
