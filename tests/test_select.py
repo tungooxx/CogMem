@@ -1,6 +1,7 @@
 import pytest
 from cogmem.config import CogMemConfig
 from cogmem.consolidation.select import (
+    filter_manifest_eligible,
     select_q_top_k,
     select_recency,
     select_frequency,
@@ -79,6 +80,21 @@ class TestAll:
     def test_returns_everything(self, sample_episodes, config):
         selected = select_all(sample_episodes, config)
         assert len(selected) == len(sample_episodes)
+
+
+class TestManifestFiltering:
+    def test_filters_to_allowed_manifests(self, sample_episodes):
+        episodes = []
+        for idx, ep in enumerate(sample_episodes[:4]):
+            clone = dict(ep)
+            clone["manifest_id"] = "manifest_a" if idx % 2 == 0 else "manifest_b"
+            episodes.append(clone)
+
+        cfg = CogMemConfig(q_threshold=0.0, allowed_manifest_ids=["manifest_a"])
+        filtered = filter_manifest_eligible(episodes, cfg)
+
+        assert len(filtered) == 2
+        assert {ep["manifest_id"] for ep in filtered} == {"manifest_a"}
 
 
 class TestFairComparison:

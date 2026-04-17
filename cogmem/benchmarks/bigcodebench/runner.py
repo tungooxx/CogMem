@@ -10,6 +10,7 @@ Episodes include:
 
 import json
 import time
+from hashlib import sha256
 from pathlib import Path
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
@@ -114,16 +115,34 @@ def _make_episode(
             last_code = t["code"]
             break
 
+    task_description = task.get("instruct_prompt", task.get("complete_prompt", ""))
+    task_hash = sha256(
+        json.dumps(
+            {
+                "task_id": task.get("task_id"),
+                "prompt": task_description,
+                "entry_point": task.get("entry_point", ""),
+                "libs": task.get("libs", []),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
     return {
         "episode_id": f"bigcode_{task['task_id'].replace('/', '_')}_{int(time.time())}",
         "task_id": task["task_id"],
         "task_type": "bigcodebench",
-        "task_description": task.get("instruct_prompt", task.get("complete_prompt", "")),
+        "task_description": task_description,
         "script": last_response,
         "generated_code": last_code,
         "final_code": final_code,
         "success": success,
         "q_value": 1.0 if success else 0.0,  # outcome-based initial signal
+        "split_name": task.get("split_name"),
+        "manifest_id": task.get("manifest_id"),
+        "task_hash": task_hash,
+        "source_benchmark": task.get("source_benchmark", "bigcodebench"),
         "error": trajectory[-1].get("error") if trajectory else None,
         "entry_point": task.get("entry_point", ""),
         "trajectory": trajectory,

@@ -195,6 +195,17 @@ class TestDataset:
         filtered = filter_by_ids(tasks, {"a", "c"})
         assert len(filtered) == 2
 
+    def test_filter_by_split(self):
+        from cogmem.benchmarks.bigcodebench.dataset import filter_by_split
+
+        tasks = [
+            {"task_id": "a", "split_name": "train"},
+            {"task_id": "b", "split_name": "dev"},
+            {"task_id": "c", "split_name": "train"},
+        ]
+        filtered = filter_by_split(tasks, "train")
+        assert [task["task_id"] for task in filtered] == ["a", "c"]
+
 
 # --- runner tests ---
 
@@ -207,6 +218,9 @@ class TestRunner:
             "instruct_prompt": "Write foo",
             "complete_prompt": "def foo():",
             "entry_point": "foo",
+            "split_name": "train",
+            "manifest_id": "manifest_123",
+            "source_benchmark": "bigcodebench",
         }
         trajectory = [
             {"attempt": 1, "code": "return 1", "response": "Thought: ...\nCode: ...",
@@ -220,6 +234,10 @@ class TestRunner:
         assert "bigcode_" in ep["episode_id"]
         assert ep["trajectory"] == trajectory
         assert ep["final_code"] == "return 1"
+        assert ep["split_name"] == "train"
+        assert ep["manifest_id"] == "manifest_123"
+        assert ep["source_benchmark"] == "bigcodebench"
+        assert len(ep["task_hash"]) == 64
 
     def test_make_episode_failure(self):
         from cogmem.benchmarks.bigcodebench.runner import _make_episode

@@ -17,6 +17,10 @@ def test_default_config():
     assert cfg.verifier_rank == 16
     assert cfg.num_candidates == 8
     assert cfg.use_dora is True
+    assert cfg.bigcodebench_eval_label == "bigcodebench_cl"
+    assert cfg.allowed_manifest_ids == []
+    assert cfg.blocked_manifest_ids == []
+    assert cfg.require_manifest_match is False
 
 
 def test_set_active_model():

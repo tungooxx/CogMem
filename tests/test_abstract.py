@@ -59,6 +59,23 @@ class TestPrepareTrainingDataset:
         dataset_instructions = {p["instruction"] for p in dataset}
         assert replay_instructions.issubset(dataset_instructions)
 
+    def test_filters_by_allowed_manifest_ids(self, sample_episodes):
+        from cogmem.config import CogMemConfig
+
+        episodes = []
+        for idx, ep in enumerate(sample_episodes[:4]):
+            clone = dict(ep)
+            clone["manifest_id"] = "manifest_a" if idx < 2 else "manifest_b"
+            clone["success"] = True
+            episodes.append(clone)
+
+        dataset = prepare_training_dataset(
+            episodes,
+            config=CogMemConfig(allowed_manifest_ids=["manifest_a"]),
+        )
+
+        assert all(pair["source_episode"] in {episodes[0]["episode_id"], episodes[1]["episode_id"]} for pair in dataset)
+
 
 class TestSaveAsJsonl:
     def test_jsonl_format(self, tmp_path):

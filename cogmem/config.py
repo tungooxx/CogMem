@@ -31,6 +31,7 @@ class CogMemConfig:
     bigcodebench_episodes: int = 148
     bigcodebench_split: str = "instruct"
     bigcodebench_max_attempts: int = 3
+    bigcodebench_eval_label: str = "bigcodebench_cl"
 
     # --- Models ---
     # Primary: Coder 3B (proves refinement)
@@ -62,6 +63,11 @@ class CogMemConfig:
     q_gamma: float = 0.0
     q_initial: float = 0.5
     q_threshold: float = 0.7
+
+    # --- Split lineage / contamination guards ---
+    allowed_manifest_ids: List[str] = field(default_factory=list)
+    blocked_manifest_ids: List[str] = field(default_factory=list)
+    require_manifest_match: bool = False
 
     # --- Generator DoRA: Stage 1 (SFT) ---
     generator_rank: int = 16

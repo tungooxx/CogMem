@@ -23,7 +23,7 @@ from cogmem.consolidation.abstract import (
     prepare_training_dataset,
     save_as_jsonl,
 )
-from cogmem.consolidation.select import POLICIES
+from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
 from cogmem.consolidation.train_generator import train_generator_full
 from cogmem.consolidation.train_verifier import train_verifier
 from cogmem.consolidation.verify import (
@@ -71,7 +71,7 @@ def run_qstar_cycle(
 
     # 1. Load and split holdout BEFORE training
     bank = MemoryBank.load(memory_bank_path)
-    all_episodes = list(bank)
+    all_episodes = filter_manifest_eligible(list(bank), config)
     print(f"\n1. Memory bank: {len(all_episodes)} episodes")
 
     holdout_n = min(config.min_holdout, len(all_episodes))
@@ -264,7 +264,11 @@ def run_consolidation(
     policy_fn = POLICIES[policy_name]
     selected = policy_fn(available_episodes, config)
 
-    training_pairs = prepare_training_dataset(selected, replay_buffer=replay_buffer)
+    training_pairs = prepare_training_dataset(
+        selected,
+        replay_buffer=replay_buffer,
+        config=config,
+    )
     jsonl_dir = f"{config.logs_dir}/jsonl"
     jsonl_path = save_as_jsonl(training_pairs, f"{jsonl_dir}/{policy_name}.jsonl")
 

@@ -8,8 +8,10 @@ Two dataset types:
 import json
 from pathlib import Path
 
+from cogmem.consolidation.select import filter_manifest_eligible
 
-def episode_to_training_pair(episode: dict, include_failures: bool = True) -> dict | None:
+
+def episode_to_training_pair(episode: dict, include_failures: bool = False) -> dict | None:
     if not episode.get("script"):
         return None
     if not include_failures and not episode.get("success"):
@@ -34,8 +36,11 @@ def q_weighted_duplicates(pairs: list[dict]) -> list[dict]:
 def prepare_training_dataset(
     episodes: list[dict],
     replay_buffer: list[dict] | None = None,
-    include_failures: bool = True,
+    include_failures: bool = False,
+    config=None,
 ) -> list[dict]:
+    if config is not None:
+        episodes = filter_manifest_eligible(episodes, config)
     pairs = []
     for ep in episodes:
         pair = episode_to_training_pair(ep, include_failures=include_failures)
@@ -44,6 +49,8 @@ def prepare_training_dataset(
 
     if replay_buffer:
         for example in replay_buffer:
+            if config is not None and not filter_manifest_eligible([example], config):
+                continue
             pairs.append({
                 "instruction": example["instruction"],
                 "response": example["response"],
@@ -86,6 +93,7 @@ def prepare_preference_dataset(
     Cycle 0: pairs come from within-episode retries (if any).
     Cycle 1+: cross-cycle pairs appear as the model re-attempts tasks.
     """
+    all_episodes = filter_manifest_eligible(all_episodes, config)
     pairs = []
 
     # ═══ Source 1: Within-episode pairs ═══
