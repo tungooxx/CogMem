@@ -256,6 +256,7 @@ def run_patch_episode_recording(
         ]
 
         candidates = []
+        responses: list[str] = []
         try:
             responses = _generate_many(
                 base_model,
@@ -264,13 +265,55 @@ def run_patch_episode_recording(
                 n_candidates=config.n_candidates,
                 temperature=config.collect_temperature,
             )
-            for response in responses:
+        except Exception as exc:
+            if verbose:
+                print(
+                    "  batched generation failed for {}: {}: {}".format(
+                        task["task_id"],
+                        type(exc).__name__,
+                        exc,
+                    )
+                )
+                print("  falling back to sequential candidate generation")
+            responses = []
+            for candidate_idx in range(config.n_candidates):
+                try:
+                    responses.append(
+                        _generate_one(
+                            base_model,
+                            tokenizer,
+                            messages,
+                            temperature=config.collect_temperature,
+                        )
+                    )
+                except Exception as single_exc:
+                    if verbose:
+                        print(
+                            "  sequential generation failed for {} candidate {}: {}: {}".format(
+                                task["task_id"],
+                                candidate_idx + 1,
+                                type(single_exc).__name__,
+                                single_exc,
+                            )
+                        )
+                    responses = []
+                    break
+
+        for response in responses:
+            try:
                 code = extract_code(response)
                 if code and len(code.strip()) > 20:
                     result = evaluate_solution(task, code, timeout=config.eval_timeout, mode="subprocess")
                     candidates.append({"code": code, "passed": result["passed"]})
-        except Exception:
-            candidates = []
+            except Exception as eval_exc:
+                if verbose and i < 3:
+                    print(
+                        "  evaluation failed for {}: {}: {}".format(
+                            task["task_id"],
+                            type(eval_exc).__name__,
+                            eval_exc,
+                        )
+                    )
 
         passes = [candidate for candidate in candidates if candidate["passed"]]
         fails = [candidate for candidate in candidates if not candidate["passed"]]
