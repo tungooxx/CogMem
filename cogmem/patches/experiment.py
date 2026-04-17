@@ -124,6 +124,25 @@ def _to_embedding_list(embedding) -> list[float]:
     return list(embedding)
 
 
+def _encode_prompt_embedding(embedder, prompt: str) -> list[float]:
+    """Encode with a CPU float32 sentence-transformer to avoid Half-on-CPU errors."""
+    try:
+        if hasattr(embedder, "cpu"):
+            embedder.cpu()
+        if hasattr(embedder, "float"):
+            embedder.float()
+        if hasattr(embedder, "eval"):
+            embedder.eval()
+    except Exception:
+        pass
+    embedding = embedder.encode(
+        prompt,
+        convert_to_numpy=True,
+        normalize_embeddings=False,
+    )
+    return np.asarray(embedding, dtype=np.float32).tolist()
+
+
 def _memory_rows(memory_bank: "ClusterMemoryBank", *, limit: int = 10) -> list[dict]:
     rows = []
     max_support = max((memory.support_count for memory in memory_bank.memories), default=0)
@@ -198,6 +217,12 @@ def load_patch_runtime(
         tokenizer.pad_token = tokenizer.eos_token
 
     embedder = SentenceTransformer(embedder_name, device="cpu")
+    if hasattr(embedder, "cpu"):
+        embedder.cpu()
+    if hasattr(embedder, "float"):
+        embedder.float()
+    if hasattr(embedder, "eval"):
+        embedder.eval()
     return base_model, tokenizer, embedder
 
 
@@ -249,7 +274,7 @@ def run_patch_episode_recording(
     for i in range(start_idx, len(train_tasks)):
         task = train_tasks[i]
         prompt = _task_prompt(task)
-        task_embedding = _to_embedding_list(embedder.encode(prompt))
+        task_embedding = _encode_prompt_embedding(embedder, prompt)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -444,7 +469,7 @@ def build_patch_memories(
         max_reuse = max((memory.reuse_count for memory in memory_bank.memories), default=0)
         for task in eval_tasks[:sample_tasks]:
             prompt = _task_prompt(task)
-            task_embedding = _to_embedding_list(embedder.encode(prompt))
+            task_embedding = _encode_prompt_embedding(embedder, prompt)
             task_array = np.asarray(task_embedding, dtype=np.float32)
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -516,7 +541,7 @@ def inspect_unseen_retrieval(
 
     for task in unseen_subset:
         prompt = _task_prompt(task)
-        task_embedding = np.asarray(_to_embedding_list(embedder.encode(prompt)), dtype=np.float32)
+        task_embedding = np.asarray(_encode_prompt_embedding(embedder, prompt), dtype=np.float32)
         scored = []
         for memory in retrievable_memories:
             applicability = _compute_applicability(memory, task_embedding, prompt)
@@ -589,7 +614,7 @@ def sweep_patch_retrieval_width(
         print(f"Running gated retrieval sweep on {len(seen_subset)} seen tasks")
     for task in seen_subset:
         prompt = _task_prompt(task)
-        task_embedding = _to_embedding_list(embedder.encode(prompt))
+        task_embedding = _encode_prompt_embedding(embedder, prompt)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -704,7 +729,7 @@ def _run_eval_split(
     for i, task in enumerate(tasks):
         task_id = task.get("task_id", task.get("id", f"{label}_{i}"))
         prompt = _task_prompt(task)
-        task_embedding = _to_embedding_list(embedder.encode(prompt))
+        task_embedding = _encode_prompt_embedding(embedder, prompt)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
