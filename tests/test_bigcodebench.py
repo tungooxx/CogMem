@@ -239,6 +239,11 @@ class TestRunner:
         assert ep["manifest_id"] == "manifest_123"
         assert ep["source_benchmark"] == "bigcodebench"
         assert len(ep["task_hash"]) == 64
+        assert len(ep["prompt_hash"]) == 64
+        assert ep["retrieved_ids"] == []
+        assert ep["adapter_ids"] == []
+        assert ep["validation_recipe"]["kind"] == "bigcodebench_exec"
+        assert ep["error_family"] is None
 
     def test_make_episode_failure(self):
         from cogmem.benchmarks.bigcodebench.runner import _make_episode
@@ -254,6 +259,7 @@ class TestRunner:
         assert ep["q_value"] == 0.0  # failure -> 0.0 initial signal
         assert ep["episode_helpfulness"] == 0.0
         assert ep["num_attempts"] == 1
+        assert ep["error_family"] == "SyntaxError"
 
     def test_load_episodes(self):
         from cogmem.benchmarks.bigcodebench.runner import load_episodes

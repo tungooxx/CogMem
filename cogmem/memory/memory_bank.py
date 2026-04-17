@@ -1,4 +1,4 @@
-"""CogMem episodic memory bank with explicit episode helpfulness support."""
+"""Compatibility wrapper around the typed episodic store."""
 
 from __future__ import annotations
 
@@ -6,72 +6,24 @@ import hashlib
 import json
 import random
 from collections import defaultdict
-from pathlib import Path
 from statistics import mean, stdev
 
-from cogmem.memory.schema import (
-    DEFAULT_EPISODE_HELPFULNESS,
-    get_episode_helpfulness,
-    normalize_episode_metrics,
-    set_episode_helpfulness,
-)
+from cogmem.memory.episodic_store import EpisodicStore
+from cogmem.memory.schema import DEFAULT_EPISODE_HELPFULNESS, get_episode_helpfulness, set_episode_helpfulness
 
 
 Q_INITIAL = DEFAULT_EPISODE_HELPFULNESS
 Q_ALPHA = 0.3
 
 
-class MemoryBank:
-    def __init__(self, episodes: list[dict]):
-        self._episodes = [normalize_episode_metrics(ep, default=Q_INITIAL) for ep in episodes]
-        self._index = {ep["episode_id"]: ep for ep in self._episodes}
-
-    @classmethod
-    def load(cls, path: str) -> "MemoryBank":
-        p = Path(path)
-        if not p.exists():
-            return cls([])
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return cls(data)
-
-    def save(self, path: str) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self._episodes, f, indent=2)
-
-    def __len__(self) -> int:
-        return len(self._episodes)
-
-    def __iter__(self):
-        return iter(self._episodes)
-
-    @property
-    def episodes(self) -> tuple[dict, ...]:
-        return tuple(self._episodes)
-
-    def add(self, episode: dict) -> None:
-        """Add or replace an episode in the bank."""
-        if "episode_id" not in episode:
-            raise ValueError("Episode must contain 'episode_id'")
-        episode = normalize_episode_metrics(episode, default=Q_INITIAL)
-        eid = episode["episode_id"]
-        if eid in self._index:
-            idx = next(i for i, ep in enumerate(self._episodes) if ep["episode_id"] == eid)
-            self._episodes[idx] = episode
-            self._index[eid] = episode
-        else:
-            self._episodes.append(episode)
-            self._index[eid] = episode
-
-    def get(self, episode_id: str) -> dict | None:
-        return self._index.get(episode_id)
+class MemoryBank(EpisodicStore):
+    """Legacy episodic memory interface backed by the typed EpisodicStore."""
 
     def successful(self) -> list[dict]:
-        return [ep for ep in self._episodes if ep.get("success")]
+        return self.filter(success=True)
 
     def by_task_type(self, task_type: str) -> list[dict]:
-        return [ep for ep in self._episodes if ep.get("task_type", "general") == task_type]
+        return self.filter(task_type=task_type)
 
     def task_types(self) -> set[str]:
         return {ep.get("task_type", "general") for ep in self._episodes}
@@ -80,20 +32,18 @@ class MemoryBank:
         return {ep.get("task_id", "") for ep in self._episodes if ep.get("task_id")}
 
     def update_q(self, episode_id: str, task_succeeded: bool) -> None:
-        """Update episodic helpfulness after a retrieved episode is used."""
-        ep = self._index.get(episode_id)
-        if ep is None:
+        episode = self._index.get(episode_id)
+        if episode is None:
             return
-
         reward = 1.0 if task_succeeded else 0.0
-        old_score = get_episode_helpfulness(ep, Q_INITIAL)
+        old_score = get_episode_helpfulness(episode, Q_INITIAL)
         new_score = old_score + Q_ALPHA * (reward - old_score)
-        set_episode_helpfulness(ep, new_score, mirror_legacy_q_value=True)
-        ep["q_visits"] = ep.get("q_visits", 0) + 1
+        set_episode_helpfulness(episode, new_score, mirror_legacy_q_value=True)
+        episode["q_visits"] = episode.get("q_visits", 0) + 1
         if task_succeeded:
-            ep["q_successes"] = ep.get("q_successes", 0) + 1
+            episode["q_successes"] = episode.get("q_successes", 0) + 1
         else:
-            ep["q_failures"] = ep.get("q_failures", 0) + 1
+            episode["q_failures"] = episode.get("q_failures", 0) + 1
 
     def stratified_holdout(
         self, n: int, seed: int = 42

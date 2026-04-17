@@ -15,6 +15,7 @@ from pathlib import Path
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import extract_code, format_messages
+from cogmem.memory.episodic_store import EpisodicStore, normalize_episode_record
 from cogmem.memory.schema import set_episode_helpfulness
 
 
@@ -150,7 +151,7 @@ def _make_episode(
         "timestamp": time.time(),
     }
     set_episode_helpfulness(episode, 1.0 if success else 0.0, mirror_legacy_q_value=True)
-    return episode
+    return normalize_episode_record(episode)
 
 
 # -------------------------------------------------------------------------
@@ -216,12 +217,10 @@ def run_batch(
         done += 1
 
         if output_path:
-            with open(output_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(episode, ensure_ascii=False) + "\n")
+            EpisodicStore.append_jsonl(output_path, episode)
 
         if checkpoint_path and checkpoint_path != output_path:
-            with open(checkpoint_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(episode, ensure_ascii=False) + "\n")
+            EpisodicStore.append_jsonl(checkpoint_path, episode)
 
         status = "PASS" if episode["success"] else "FAIL"
         attempts = episode["num_attempts"]
@@ -236,9 +235,7 @@ def run_batch(
 
 def episodes_to_memory_bank(episodes: list[dict], output_path: str) -> str:
     """Convert episodes list to CogMem memory bank JSON format."""
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(episodes, f, indent=2, ensure_ascii=False)
+    EpisodicStore(episodes).save(output_path)
     total = len(episodes)
     passed = sum(1 for ep in episodes if ep["success"])
     rate = passed / total if total > 0 else 0.0
@@ -251,15 +248,5 @@ def load_episodes(path: str) -> list[dict]:
 
     Tolerates truncated final lines (e.g. from a crash mid-write).
     """
-    episodes = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                episodes.append(json.loads(line))
-            except json.JSONDecodeError:
-                print(f"Warning: skipping malformed line in {path}")
-                continue
-    return episodes
+    store = EpisodicStore.load_jsonl(path)
+    return list(store)

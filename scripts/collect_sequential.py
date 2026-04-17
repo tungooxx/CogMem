@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
+from cogmem.memory.episodic_store import EpisodicStore, normalize_episode_record
+from cogmem.memory.schema import get_episode_helpfulness, set_episode_helpfulness
 
 # ════════════════════════════════════════════
 # CONFIG
@@ -72,8 +74,7 @@ class SequentialMemoryBank:
     def _load(self):
         if Path(self.path).exists():
             try:
-                with open(self.path) as f:
-                    raw = json.load(f)
+                raw = list(EpisodicStore.load(self.path))
             except json.JSONDecodeError:
                 print(f"Warning: corrupt memory bank at {self.path}, starting fresh")
                 return
@@ -91,13 +92,12 @@ class SequentialMemoryBank:
             print(f"Loaded {len(self.episodes)} episodes from {self.path}")
 
     def save(self):
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "w") as f:
-            json.dump(self.episodes, f, indent=2)
+        EpisodicStore(self.episodes).save(self.path)
 
     def add(self, episode):
-        self.episodes.append(episode)
-        self.embeddings.append(np.array(episode["intent_embedding"]))
+        normalized = normalize_episode_record(episode, copy_episode=True)
+        self.episodes.append(normalized)
+        self.embeddings.append(np.array(normalized["intent_embedding"]))
 
     def retrieve(self, query_embedding, top_k_semantic=10, top_k_final=3,
                  min_similarity=0.3):
@@ -125,7 +125,7 @@ class SequentialMemoryBank:
         reranked = []
         for i, sim in candidates:
             ep = self.episodes[i]
-            score = sim * 0.4 + ep["q_value"] * 0.6
+            score = sim * 0.4 + get_episode_helpfulness(ep) * 0.6
             reranked.append((i, score, sim))
 
         reranked.sort(key=lambda x: x[1], reverse=True)
@@ -144,7 +144,12 @@ class SequentialMemoryBank:
         """Update Q-value based on whether retrieval helped."""
         ep = self.episodes[episode_index]
         reward = Q_REWARD_SUCCESS if task_succeeded else Q_REWARD_FAIL
-        ep["q_value"] = ep["q_value"] + Q_ALPHA * (reward - ep["q_value"])
+        current = get_episode_helpfulness(ep, Q_INITIAL)
+        set_episode_helpfulness(
+            ep,
+            current + Q_ALPHA * (reward - current),
+            mirror_legacy_q_value=True,
+        )
         ep["q_visits"] = ep.get("q_visits", 0) + 1
         if task_succeeded:
             ep["q_successes"] = ep.get("q_successes", 0) + 1
@@ -157,7 +162,7 @@ class SequentialMemoryBank:
     def get_q_stats(self):
         if not self.episodes:
             return {}
-        q_vals = [ep["q_value"] for ep in self.episodes]
+        q_vals = [get_episode_helpfulness(ep) for ep in self.episodes]
         return {
             "total": len(self.episodes),
             "mean_q": float(np.mean(q_vals)),
@@ -193,7 +198,7 @@ def build_prompt_with_retrieval(task_description, retrieved_episodes):
             code = ep.get("generated_code", "")
             desc = ep.get("task_description", "")[:200]
             parts.append(
-                f"--- Example {i+1} (Q={ep['q_value']:.2f}) ---\n"
+                f"--- Example {i+1} (Q={get_episode_helpfulness(ep):.2f}) ---\n"
                 f"Task: {desc}\n"
                 f"Solution:\n```python\n{code}\n```\n"
             )
@@ -354,10 +359,20 @@ def collect_sequential(tasks_path, resume=False, shuffle=False, model=None, cycl
             "q_successes": 0,
             "q_failures": 0,
             "retrieved_from": [ep["episode_id"] for ep in retrieved if ep.get("success")],
+            "retrieved_ids": [ep["episode_id"] for ep in retrieved if ep.get("success")],
+            "adapter_ids": [],
             "retrieved_by": [],
             "intent_embedding": task_embedding,
             "error": error,
+            "error_family": None,
             "entry_point": task.get("entry_point", ""),
+            "prompt_hash": None,
+            "validation_recipe": {
+                "kind": "bigcodebench_exec",
+                "entry_point": task.get("entry_point", ""),
+                "task_id": task_id,
+            },
+            "source_benchmark": "bigcodebench",
             "model": active_model,
             "cycle": cycle,
             "timestamp": time.time(),
@@ -427,7 +442,7 @@ def analyze_q_values(bank_path):
     with open(bank_path) as f:
         episodes = json.load(f)
 
-    q_vals = [ep["q_value"] for ep in episodes]
+    q_vals = [get_episode_helpfulness(ep) for ep in episodes]
 
     print(f"\nQ-VALUE ANALYSIS ({len(episodes)} episodes)")
     print("=" * 60)
@@ -449,7 +464,7 @@ def analyze_q_values(bank_path):
         f = ep.get("q_failures", 0)
         if v > 0:
             print(
-                f"  {ep['task_id']}: Q={ep['q_value']:.2f} "
+                f"  {ep['task_id']}: Q={get_episode_helpfulness(ep):.2f} "
                 f"visits={v} helped={s} hurt={f} "
                 f"help_rate={s/v:.0%} "
                 f"{'PASS' if ep['success'] else 'FAIL'}"
@@ -464,7 +479,7 @@ def analyze_q_values(bank_path):
     ]:
         bucket = [
             ep for ep in episodes
-            if q_min <= ep["q_value"] < q_max and ep.get("q_visits", 0) > 0
+            if q_min <= get_episode_helpfulness(ep) < q_max and ep.get("q_visits", 0) > 0
         ]
         if bucket:
             avg_help = np.mean([
