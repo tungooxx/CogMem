@@ -1,0 +1,157 @@
+"""Typed storage for procedural skill cards."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from copy import deepcopy
+from pathlib import Path
+
+from cogmem.memory.schema import CARD_TRANSFER_GAIN_KEY, NEGATIVE_TRANSFER_RATE_KEY, RETRIEVAL_CONFIDENCE_KEY
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _dedupe_str_list(values) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        text = str(value).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _skill_id(card: dict) -> str:
+    if card.get("skill_id"):
+        return str(card["skill_id"])
+    seed = json.dumps(
+        {
+            "task_type": card.get("task_type", "general"),
+            "domain": card.get("domain", "general"),
+            "error_family": card.get("error_family"),
+            "triggers": _dedupe_str_list(card.get("triggers", [])),
+            "evidence_episode_ids": _dedupe_str_list(card.get("evidence_episode_ids", [])),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return f"skill_{hashlib.sha256(seed).hexdigest()[:16]}"
+
+
+def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
+    target = deepcopy(card) if copy_card else card
+    target["skill_id"] = _skill_id(target)
+    target["triggers"] = _dedupe_str_list(target.get("triggers", []))
+    target["plan_steps"] = _dedupe_str_list(target.get("plan_steps", []))
+    target["anti_patterns"] = _dedupe_str_list(target.get("anti_patterns", []))
+    target["evidence_episode_ids"] = _dedupe_str_list(target.get("evidence_episode_ids", []))
+    target["manifest_ids"] = sorted(set(_dedupe_str_list(target.get("manifest_ids", []))))
+    target["validation"] = dict(target.get("validation", {}) or {})
+    target["task_type"] = str(target.get("task_type", "general") or "general")
+    target["domain"] = str(target.get("domain", "general") or "general")
+    target["error_family"] = target.get("error_family")
+    target["source_episode_count"] = int(target.get("source_episode_count") or len(target["evidence_episode_ids"]))
+    transfer_gain = float(target.get("transfer_gain", target.get(CARD_TRANSFER_GAIN_KEY, 0.0)) or 0.0)
+    confidence = _clamp01(target.get("confidence", target.get(RETRIEVAL_CONFIDENCE_KEY, 0.0)) or 0.0)
+    negative_transfer_rate = _clamp01(
+        target.get("negative_transfer_rate", target.get(NEGATIVE_TRANSFER_RATE_KEY, 0.0)) or 0.0
+    )
+    target["transfer_gain"] = transfer_gain
+    target[CARD_TRANSFER_GAIN_KEY] = transfer_gain
+    target["confidence"] = confidence
+    target[RETRIEVAL_CONFIDENCE_KEY] = confidence
+    target["negative_transfer_rate"] = negative_transfer_rate
+    target[NEGATIVE_TRANSFER_RATE_KEY] = negative_transfer_rate
+    target["status"] = str(target.get("status", "candidate") or "candidate")
+    return target
+
+
+class SkillStore:
+    """Persisted collection of validated procedural skill cards."""
+
+    def __init__(self, cards: list[dict] | None = None):
+        self._cards = [normalize_skill_card(card, copy_card=True) for card in (cards or [])]
+        self._index = {card["skill_id"]: card for card in self._cards}
+
+    def __len__(self) -> int:
+        return len(self._cards)
+
+    def __iter__(self):
+        return iter(self._cards)
+
+    @property
+    def cards(self) -> tuple[dict, ...]:
+        return tuple(self._cards)
+
+    @classmethod
+    def load(cls, path: str) -> "SkillStore":
+        p = Path(path)
+        if not p.exists():
+            return cls([])
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(data)
+
+    def save(self, path: str) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self._cards, f, indent=2, ensure_ascii=False)
+
+    def get(self, skill_id: str) -> dict | None:
+        return self._index.get(skill_id)
+
+    def add(self, card: dict) -> dict:
+        normalized = normalize_skill_card(card, copy_card=True)
+        existing = self._index.get(normalized["skill_id"])
+        if existing is None:
+            self._cards.append(normalized)
+        else:
+            idx = next(i for i, current in enumerate(self._cards) if current["skill_id"] == normalized["skill_id"])
+            self._cards[idx] = normalized
+        self._index[normalized["skill_id"]] = normalized
+        return normalized
+
+    def update(self, skill_id: str, **fields) -> dict | None:
+        card = self._index.get(skill_id)
+        if card is None:
+            return None
+        card.update(fields)
+        normalized = normalize_skill_card(card, copy_card=False)
+        self._index[skill_id] = normalized
+        return normalized
+
+    def filter(
+        self,
+        *,
+        task_type: str | None = None,
+        domain: str | None = None,
+        manifest_id: str | None = None,
+        status: str | None = None,
+        promoted: bool | None = None,
+    ) -> list[dict]:
+        results = list(self._cards)
+        if task_type is not None:
+            results = [card for card in results if card.get("task_type") == task_type]
+        if domain is not None:
+            results = [card for card in results if card.get("domain") == domain]
+        if manifest_id is not None:
+            results = [card for card in results if manifest_id in (card.get("manifest_ids") or [])]
+        if status is not None:
+            results = [card for card in results if card.get("status") == status]
+        if promoted is not None:
+            expected = "promoted" if promoted else "candidate"
+            results = [card for card in results if card.get("status") == expected]
+        return results
+
+    def summary(self) -> dict:
+        if not self._cards:
+            return {"total": 0, "promoted": 0, "mean_confidence": 0.0, "mean_transfer_gain": 0.0}
+        promoted = self.filter(promoted=True)
+        return {
+            "total": len(self._cards),
+            "promoted": len(promoted),
+            "mean_confidence": sum(card["confidence"] for card in self._cards) / len(self._cards),
+            "mean_transfer_gain": sum(card["transfer_gain"] for card in self._cards) / len(self._cards),
+        }

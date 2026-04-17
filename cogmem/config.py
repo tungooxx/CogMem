@@ -25,6 +25,7 @@ class CogMemConfig:
     adapters_dir: str = "results/adapters"
     experiments_dir: str = "results/experiments"
     logs_dir: str = "logs/"
+    skills_dir: str = "results/skills"
 
     # --- Episode collection ---
     alfworld_episodes: int = 300
@@ -68,6 +69,14 @@ class CogMemConfig:
     allowed_manifest_ids: List[str] = field(default_factory=list)
     blocked_manifest_ids: List[str] = field(default_factory=list)
     require_manifest_match: bool = False
+
+    # --- Procedural skill cards ---
+    skill_min_evidence: int = 3
+    skill_confidence_threshold: float = 0.6
+    skill_min_transfer_gain: float = 0.05
+    skill_validation_min_matches: int = 2
+    skill_trigger_limit: int = 6
+    skill_plan_limit: int = 5
 
     # --- Generator DoRA: Stage 1 (SFT) ---
     generator_rank: int = 16

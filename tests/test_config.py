@@ -21,6 +21,9 @@ def test_default_config():
     assert cfg.allowed_manifest_ids == []
     assert cfg.blocked_manifest_ids == []
     assert cfg.require_manifest_match is False
+    assert cfg.skills_dir == "results/skills"
+    assert cfg.skill_min_evidence == 3
+    assert cfg.skill_confidence_threshold == 0.6
 
 
 def test_set_active_model():

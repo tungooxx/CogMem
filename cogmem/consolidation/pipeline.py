@@ -23,6 +23,7 @@ from cogmem.consolidation.abstract import (
     prepare_training_dataset,
     save_as_jsonl,
 )
+from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
 from cogmem.consolidation.train_generator import train_generator_full
 from cogmem.consolidation.train_verifier import train_verifier
@@ -88,6 +89,19 @@ def run_qstar_cycle(
     print(f"  Successes: {len(successes)}")
     print(f"  High-Q selected: {len(selected)} (Q >= {config.q_threshold})")
 
+    skill_cards_path = str(Path(config.skills_dir) / f"skill_cards_cycle_{cycle}.json")
+    skill_store = build_skill_cards(
+        available_episodes,
+        holdout_episodes,
+        config=config,
+        output_path=skill_cards_path,
+    )
+    skill_summary = skill_store.summary()
+    print(
+        f"  Skill cards: {skill_summary['total']} candidates, "
+        f"{skill_summary['promoted']} promoted"
+    )
+
     # 2. Build preference pairs (from available episodes only)
     print("\n2. Building preference pairs from Q-values...")
     pref_pairs = prepare_preference_dataset(available_episodes, config)
@@ -112,6 +126,9 @@ def run_qstar_cycle(
             "preference_pairs": len(pref_pairs),
             "generator_path": None,
             "verifier_path": None,
+            "skill_cards_path": skill_cards_path,
+            "skill_cards_total": skill_summary["total"],
+            "skill_cards_promoted": skill_summary["promoted"],
             "verification": {},
             "status": "skipped_no_data",
         }
@@ -158,6 +175,9 @@ def run_qstar_cycle(
         "preference_pairs": len(pref_pairs),
         "generator_path": generator_path,
         "verifier_path": verifier_path,
+        "skill_cards_path": skill_cards_path,
+        "skill_cards_total": skill_summary["total"],
+        "skill_cards_promoted": skill_summary["promoted"],
         "verification": verification,
     }
 
@@ -170,6 +190,7 @@ def run_qstar_cycle(
     print(f"CYCLE {cycle} COMPLETE")
     print(f"  Generator: {generator_path}")
     print(f"  Verifier:  {verifier_path}")
+    print(f"  Skill cards: {skill_summary['promoted']}/{skill_summary['total']} promoted")
     if verification:
         print(f"  Pass rate: {verification['mean']:.1%}")
     print("=" * 60)
