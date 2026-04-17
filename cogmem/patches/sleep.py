@@ -1,9 +1,13 @@
-"""Sleep mode — consolidate cognitive patches.
+"""Legacy sleep mode for the experimental patch bank.
 
 1. MERGE: combine similar high-Q patches into stronger patches
 2. PRUNE: remove low-Q patches that never help
 3. PROMOTE: very high-Q patches become permanent (always active)
 4. GROW: increase rank of merged patches for more capacity
+
+This module is retained only for the legacy PatchBank research path.
+The main CogMem direction is to promote validated skill cards first and
+train adapters from those promoted cards rather than from raw patch banks.
 """
 
 import numpy as np
@@ -14,7 +18,7 @@ from cogmem.patches.patch import CognitivePatch
 
 
 def run_sleep_cycle(patch_bank: PatchBank, config: dict | None = None) -> dict:
-    """Consolidate patches during sleep phase.
+    """Consolidate patches during the legacy research sleep phase.
 
     Args:
         patch_bank: Bank to consolidate.

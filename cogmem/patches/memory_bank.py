@@ -1,8 +1,12 @@
-"""Episode-first cluster memory bank for cognitive patch retrieval.
+"""Experimental episode-first cluster memory bank for cognitive patches.
 
 Episodes are the primary persisted unit. Cluster memories are built from
 similar episodes and may distill reusable LoRA patch artifacts that are
 composed at inference time.
+
+This module remains a research-only consolidation path. The long-term memory
+ladder in CogMem is episodes -> skill cards -> optional adapters; patch artifacts
+are an experimental compression probe, not the production memory abstraction.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ DEFAULT_USE_RECENT_SUCCESS_WEIGHT = 0.20
 DEFAULT_USE_REUSE_WEIGHT = 0.15
 DEFAULT_USE_ONLINE_HURT_WEIGHT = 0.20
 DEFAULT_FINAL_USE_PROMOTE_WEIGHT = 0.15
+DEFAULT_ACTIVE_MEMORY_TOP_K = 1
 DEFAULT_MULTI_MEMORY_CONFIDENCE = 0.80
 DEFAULT_MULTI_MEMORY_MARGIN = 0.05
 DEFAULT_SLEEP_PROMOTE_MIN_SCORE = 0.40
@@ -191,7 +196,7 @@ class ClusterMemory:
 
 
 class ClusterMemoryBank:
-    """Default retrieval surface: episodes -> cluster memories -> patch artifacts."""
+    """Experimental retrieval surface for patch-backed cluster memories."""
 
     def __init__(self, save_dir: str):
         self.save_dir = Path(save_dir)
@@ -354,8 +359,9 @@ class ClusterMemoryBank:
         self,
         query_embedding: list[float],
         task_prompt: str,
-        top_k: int = 5,
+        top_k: int = DEFAULT_ACTIVE_MEMORY_TOP_K,
     ) -> list[ClusterMemory]:
+        """Return the research-path active memories, defaulting to top-1 retrieval."""
         if not self.memories:
             return []
 
@@ -394,9 +400,10 @@ class ClusterMemoryBank:
         self,
         query_embedding: list[float],
         task_prompt: str,
-        top_k: int = 5,
+        top_k: int = DEFAULT_ACTIVE_MEMORY_TOP_K,
         return_memories: bool = False,
     ) -> list[CognitivePatch] | tuple[list[ClusterMemory], list[CognitivePatch]]:
+        """Load experimental patch artifacts for the selected cluster memories."""
         memories = self.get_active_memories(query_embedding, task_prompt, top_k=top_k)
         patches = self.load_patches_for_memories(
             memories,
@@ -541,6 +548,7 @@ class ClusterMemoryBank:
         for memory in self.memories:
             family_counts[memory.family_label] = family_counts.get(memory.family_label, 0) + 1
         return {
+            "mode": "experimental_patch_research",
             "episodes": len(self.episodes),
             "memories": len(self.memories),
             "retrievable_memories": sum(1 for memory in self.memories if memory.retrievable),

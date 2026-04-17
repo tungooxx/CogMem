@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from cogmem.patches.memory_bank import (
+    DEFAULT_ACTIVE_MEMORY_TOP_K,
     EpisodeRecord,
     ClusterMemory,
     ClusterMemoryBank,
@@ -293,6 +294,62 @@ def test_default_retrieval_uses_top1_unless_confidence_is_very_high(tmp_path):
     selected_ids = {memory.memory_id for memory in selected}
     assert len(selected) > 1
     assert {"memory_a", "memory_b"}.issubset(selected_ids)
+
+
+def test_default_active_memory_top_k_is_one(tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    for patch_id in ("patch_a", "patch_b"):
+        bank.artifact_bank.add(
+            CognitivePatch(
+                patch_id=patch_id,
+                embedding=[0.0, 0.0],
+                lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+            )
+        )
+    bank.memories = [
+        ClusterMemory(
+            memory_id="memory_a",
+            family_label="plotting",
+            centroid_embedding=[1.0, 0.0],
+            member_episode_ids=["ep1", "ep2", "ep3"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[1.0, 0.0],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_a"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.60,
+            recent_success_rate=0.60,
+            promotion_score=0.40,
+            retrieval_threshold=0.40,
+        ),
+        ClusterMemory(
+            memory_id="memory_b",
+            family_label="plotting",
+            centroid_embedding=[0.99, 0.01],
+            member_episode_ids=["ep4", "ep5", "ep6"],
+            support_count=3,
+            layer_window=[4, 5, 6, 7],
+            token_window=64,
+            positive_prototype=[0.99, 0.01],
+            structural_markers=["histogram"],
+            distilled_patch_ids=["patch_b"],
+            distillation_success=1.0,
+            retrievable=True,
+            transfer_gain=0.58,
+            recent_success_rate=0.58,
+            promotion_score=0.35,
+            retrieval_threshold=0.40,
+        ),
+    ]
+
+    selected = bank.get_active_memories([1.0, 0.0], "plot a histogram")
+
+    assert DEFAULT_ACTIVE_MEMORY_TOP_K == 1
+    assert len(selected) == 1
+    assert selected[0].memory_id == "memory_a"
 
 
 def test_retrieval_threshold_rejects_memory_below_gate(tmp_path):

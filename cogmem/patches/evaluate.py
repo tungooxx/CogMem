@@ -1,9 +1,9 @@
-"""Evaluation for cognitive patches.
+"""Evaluation for the experimental cognitive-patch path.
 
 Three modes:
 - Cold: base model only (floor)
-- Patched: base + dynamic cluster memories per task (full system)
-- Best-of-N: patched + N candidates per task (ceiling)
+- Patched: base + dynamic cluster memories per task (research system)
+- Best-of-N: patched + N candidates per task (research ceiling)
 """
 
 import torch
@@ -11,7 +11,11 @@ import torch
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
 from cogmem.patches.compose import PatchedModel
-from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
+from cogmem.patches.memory_bank import (
+    ClusterMemoryBank,
+    DEFAULT_ACTIVE_MEMORY_TOP_K,
+    DEFAULT_PATCH_SCALE,
+)
 from cogmem.patches.wake import generate_many_with_model, generate_with_model
 
 
@@ -69,7 +73,11 @@ def evaluate_patched(
         ]
 
         try:
-            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+            active_patches = memory_bank.get_active_patches(
+                task_embedding,
+                prompt,
+                top_k=DEFAULT_ACTIVE_MEMORY_TOP_K,
+            )
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 response = generate_with_model(base_model, tokenizer, messages, temperature=0)
             code = extract_code(response)
@@ -115,7 +123,11 @@ def evaluate_best_of_n(
 
         task_passed = False
         try:
-            active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
+            active_patches = memory_bank.get_active_patches(
+                task_embedding,
+                prompt,
+                top_k=DEFAULT_ACTIVE_MEMORY_TOP_K,
+            )
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
                 responses = generate_many_with_model(
                     base_model,

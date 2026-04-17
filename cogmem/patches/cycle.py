@@ -1,4 +1,4 @@
-"""Full wake/build cycle runner for episode-first cluster memories."""
+"""Full wake/build cycle runner for the experimental patch path."""
 
 import json
 import time
@@ -21,7 +21,7 @@ def run_cogmem_cycle(
     n_candidates: int = 8,
     eval_size: int = 200,
 ):
-    """Run full wake/sleep cycles.
+    """Run full wake/sleep cycles for the research-only patch path.
 
     Args:
         tasks_path: Path to BigCodeBench tasks JSONL.

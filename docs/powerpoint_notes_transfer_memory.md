@@ -244,3 +244,13 @@ Operationally this means a memory should score highly only if it:
 
 And if a memory helps seen tasks but repeatedly hurts unseen tasks, it should be
 demoted or stop being retrievable.
+# Patch Path Note
+
+The current `cogmem/patches/*` stack is now treated as a research-only consolidation path.
+It remains useful for ablations and patch-transfer experiments, but it is not the target
+production memory abstraction. The intended ladder is:
+
+- `episodes -> skill cards -> optional adapters`
+
+Within the patch path, default retrieval is now `top-1`; wider patch composition should be
+treated as an explicit experiment rather than the default runtime.

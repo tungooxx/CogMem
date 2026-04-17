@@ -1,4 +1,4 @@
-"""Wake mode — experience loop for cognitive patch creation.
+"""Wake mode for the experimental patch-consolidation path.
 
 Process tasks sequentially:
 1. RETRIEVE relevant cluster memories
@@ -18,7 +18,11 @@ import torch
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
 from cogmem.patches.compose import PatchedModel
-from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
+from cogmem.patches.memory_bank import (
+    ClusterMemoryBank,
+    DEFAULT_ACTIVE_MEMORY_TOP_K,
+    DEFAULT_PATCH_SCALE,
+)
 
 
 def _tokenize_messages(model, tokenizer, messages):
@@ -167,7 +171,7 @@ def run_wake_cycle(
         active_memories, active_patches = memory_bank.get_active_patches(
             task_embedding,
             prompt,
-            top_k=5,
+            top_k=DEFAULT_ACTIVE_MEMORY_TOP_K,
             return_memories=True,
         )
 

@@ -1,8 +1,8 @@
-"""CogMem Cognitive Patches — micro-LoRA adapters from experience.
+"""Experimental CogMem cognitive patches.
 
-Each patch captures one lesson from a coding experience.
-Patches compose dynamically per-task, so the model thinks
-differently based on accumulated experience.
+The patch modules remain a research-only compression path. They are useful for
+ablation and consolidation experiments, but the production memory ladder is
+episodes -> skill cards -> optional routed adapters.
 """
 
 from cogmem.patches.memory_bank import ClusterMemoryBank

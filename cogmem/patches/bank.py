@@ -1,8 +1,11 @@
-"""PatchBank — storage, retrieval, and Q-value tracking for cognitive patches.
+"""Legacy PatchBank for experimental cognitive patches.
 
 Patches stored as individual files in a directory.
 Retrieval: two-phase (semantic similarity → Q-value re-ranking).
 Q-values updated based on whether patch activation helped the task.
+
+This bank exists for the legacy patch-only research route. It is not the
+production procedural memory abstraction for CogMem.
 """
 
 import json
@@ -64,7 +67,7 @@ class PatchBank:
         return [self.patches[i] for i, _ in candidates]
 
     def get_active_patches(
-        self, query_embedding, top_k: int = 5
+        self, query_embedding, top_k: int = 1
     ) -> list[CognitivePatch]:
         """Retrieve patches, re-rank by Q-value, return top-k for composition.
 
