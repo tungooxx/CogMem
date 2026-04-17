@@ -210,6 +210,7 @@ def run_patch_episode_recording(
     config: PatchExperimentConfig | None = None,
     memory_bank: "ClusterMemoryBank" | None = None,
     reset_progress: bool = False,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     config = config or PatchExperimentConfig()
     bank = memory_bank or _new_memory_bank(config.memory_dir)
@@ -235,6 +236,15 @@ def run_patch_episode_recording(
     total_passed = int(resume_state.get("total_passed", 0)) if same_train_plan else 0
     episodes_before = int(resume_state.get("episodes_before", len(bank.episodes))) if same_train_plan else len(bank.episodes)
     start_time = time.time()
+
+    if verbose:
+        print("Resume progress file:", progress_path)
+        if start_idx > 0:
+            print(f"Resuming Cell 4 from task {start_idx + 1} of {len(train_tasks)}.")
+        else:
+            print(f"Starting Cell 4 from task 1 of {len(train_tasks)}.")
+        if start_idx >= len(train_tasks):
+            print("Cell 4 already completed for the current TRAIN_TASKS selection.")
 
     for i in range(start_idx, len(train_tasks)):
         task = train_tasks[i]
@@ -296,6 +306,21 @@ def run_patch_episode_recording(
         progress_path.parent.mkdir(parents=True, exist_ok=True)
         with open(progress_path, "w", encoding="utf-8") as f:
             json.dump(progress_state, f, indent=2)
+
+        if verbose and ((i + 1) % 10 == 0 or i < 5):
+            elapsed = time.time() - start_time
+            processed_this_run = max(i + 1 - start_idx, 1)
+            rate = processed_this_run / elapsed * 3600 if elapsed > 0 else 0.0
+            print(
+                "[{}/{}] {} | episodes={} | passes={} | {:.0f}/hr".format(
+                    i + 1,
+                    len(train_tasks),
+                    task["task_id"],
+                    len(bank.episodes),
+                    total_passed,
+                    rate,
+                )
+            )
 
     bank.save()
     progress_path.parent.mkdir(parents=True, exist_ok=True)
@@ -512,10 +537,13 @@ def sweep_patch_retrieval_width(
     embedder,
     *,
     config: PatchExperimentConfig | None = None,
+    verbose: bool = False,
 ) -> list[dict[str, Any]]:
     config = config or PatchExperimentConfig()
     seen_subset = seen_tasks[: config.sweep_diag_size]
     cached = []
+    if verbose:
+        print(f"Running gated retrieval sweep on {len(seen_subset)} seen tasks")
     for task in seen_subset:
         prompt = _task_prompt(task)
         task_embedding = _to_embedding_list(embedder.encode(prompt))
@@ -540,16 +568,22 @@ def sweep_patch_retrieval_width(
             "messages": messages,
             "cold_ok": cold_ok,
         })
+        if verbose and (len(cached) % 10 == 0 or len(cached) == len(seen_subset)):
+            cold_passed = sum(1 for row in cached if row["cold_ok"])
+            print(f"  cached cold [{len(cached)}/{len(seen_subset)}] cold={cold_passed}", flush=True)
 
     cold_passed = sum(1 for row in cached if row["cold_ok"])
     results = []
     for top_k in config.sweep_topk_options:
+        if verbose:
+            print()
+            print(f"-- top_k={top_k}, scale={config.eval_scale} --", flush=True)
         memory_passed = 0
         helped = 0
         hurt = 0
         abstained = 0
 
-        for row in cached:
+        for i, row in enumerate(cached):
             mem_ok = row["cold_ok"]
             active_patches = []
             try:
@@ -580,6 +614,13 @@ def sweep_patch_retrieval_width(
             elif row["cold_ok"] and (not mem_ok):
                 hurt += 1
 
+            if verbose and ((i + 1) % 10 == 0 or i + 1 == len(cached)):
+                print(
+                    f"  [{i+1}/{len(cached)}] memory={memory_passed} helped={helped} "
+                    f"hurt={hurt} abstain={abstained}",
+                    flush=True,
+                )
+
         results.append({
             "top_k": top_k,
             "cold_passed": cold_passed,
@@ -606,11 +647,16 @@ def _run_eval_split(
     embedder,
     config: PatchExperimentConfig,
     logger: logging.Logger,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     cold_passed = 0
     memory_passed = 0
     abstained = 0
     used_memory = 0
+
+    if verbose:
+        print()
+        print(f"--- {label} COLD + MEMORY EVAL ---")
 
     for i, task in enumerate(tasks):
         task_id = task.get("task_id", task.get("id", f"{label}_{i}"))
@@ -675,8 +721,30 @@ def _run_eval_split(
                 persist=False,
             )
 
+        if verbose and ((i + 1) % 50 == 0 or i + 1 == len(tasks)):
+            print(
+                "  [{}/{}] cold: {}/{} ({:.1%}) | memory: {}/{} ({:.1%}) | abstain={}".format(
+                    i + 1,
+                    len(tasks),
+                    cold_passed,
+                    i + 1,
+                    cold_passed / max(i + 1, 1),
+                    memory_passed,
+                    i + 1,
+                    memory_passed / max(i + 1, 1),
+                    abstained,
+                )
+            )
+
     cold_rate = cold_passed / max(len(tasks), 1)
     memory_rate = memory_passed / max(len(tasks), 1)
+    if verbose:
+        print(f"{label} cold result: {cold_passed} / {len(tasks)} ({cold_rate:.1%})")
+        print(f"{label} memory result: {memory_passed} / {len(tasks)} ({memory_rate:.1%})")
+        print(
+            f"{label} memory usage: used={used_memory} abstained={abstained} "
+            f"({abstained / max(len(tasks), 1):.1%} abstain)"
+        )
     return {
         "label": label,
         "total": len(tasks),
@@ -700,6 +768,7 @@ def evaluate_patch_memory_bank(
     *,
     config: PatchExperimentConfig | None = None,
     force_rerun: bool = False,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     config = config or PatchExperimentConfig()
     seen_tasks = list(train_tasks)
@@ -724,6 +793,8 @@ def evaluate_patch_memory_bank(
     if cached:
         seen_eval = cached["seen_eval"]
         unseen_eval = cached["unseen_eval"]
+        if verbose:
+            print("Loaded cached eval results from", cache_path)
     else:
         seen_eval = _run_eval_split(
             seen_tasks,
@@ -734,6 +805,7 @@ def evaluate_patch_memory_bank(
             embedder=embedder,
             config=config,
             logger=logger,
+            verbose=verbose,
         )
         unseen_eval = _run_eval_split(
             unseen_tasks,
@@ -744,8 +816,11 @@ def evaluate_patch_memory_bank(
             embedder=embedder,
             config=config,
             logger=logger,
+            verbose=verbose,
         )
         save_eval_cache(cache_path, {"seen_eval": seen_eval, "unseen_eval": unseen_eval})
+        if verbose:
+            print("Saved eval cache to", cache_path)
 
     memory_bank.run_sleep_cycle(prune=True)
     memory_bank.save()
