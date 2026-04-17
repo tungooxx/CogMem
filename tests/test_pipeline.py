@@ -95,8 +95,12 @@ def test_run_qstar_cycle_prefers_skill_card_sft_pairs(tmp_path, monkeypatch):
     results = run_qstar_cycle(str(bank_path), config, cycle=0, run_task_fn=None)
 
     assert results["training_source"] == "skill_cards"
-    assert results["training_examples"] == 1
+    assert results["training_examples"] == 2
     assert captured["kwargs"]["source_skill_card_ids"] == ["skill_file_io"]
-    assert len(captured["kwargs"]["sft_pairs"]) == 1
-    assert captured["kwargs"]["sft_pairs"][0]["source_skill_card"] == "skill_file_io"
-    assert captured["kwargs"]["sft_pairs"][0]["source_episode"] == "ep_2"
+    assert len(captured["kwargs"]["sft_pairs"]) == 2
+    assert {pair["source_kind"] for pair in captured["kwargs"]["sft_pairs"]} == {
+        "skill_evidence",
+        "skill_curriculum",
+    }
+    assert all(pair["source_skill_card"] == "skill_file_io" for pair in captured["kwargs"]["sft_pairs"])
+    assert all(pair["source_episode"] == "ep_2" for pair in captured["kwargs"]["sft_pairs"])

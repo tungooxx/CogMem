@@ -78,6 +78,8 @@ class CogMemConfig:
     skill_validation_min_matches: int = 2
     skill_trigger_limit: int = 6
     skill_plan_limit: int = 5
+    skill_curriculum_examples_per_card: int = 1
+    skill_curriculum_include_anti_patterns: bool = True
 
     # --- Routed adapter memory ---
     adapter_route_min_dev_gain: float = 0.0

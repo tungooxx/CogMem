@@ -6,6 +6,7 @@ from cogmem.consolidation.abstract import (
     prepare_training_dataset,
     q_weighted_duplicates,
     save_as_jsonl,
+    skill_card_to_curriculum_pair,
     skill_card_to_training_pairs,
 )
 
@@ -120,13 +121,22 @@ class TestPrepareSkillTrainingDataset:
             "skill_id": "skill_sorting",
             "manifest_ids": ["manifest_a"],
             "evidence_episode_ids": ["ep_a", "ep_b"],
+            "task_type": "sorting",
+            "domain": "collections",
+            "triggers": ["sorted", "copy"],
+            "plan_steps": ["normalize input", "return sorted values"],
+            "anti_patterns": ["avoid mutating the input list"],
             "confidence": 0.9,
             "transfer_gain": 0.6,
         }
 
         pairs = prepare_skill_training_dataset([card], episodes)
 
-        assert [pair["source_episode"] for pair in pairs] == ["ep_a", "ep_b"]
+        assert [pair["source_kind"] for pair in pairs] == [
+            "skill_evidence",
+            "skill_evidence",
+            "skill_curriculum",
+        ]
         assert all(pair["source_skill_card"] == "skill_sorting" for pair in pairs)
         assert all(0.01 <= pair["weight"] <= 1.0 for pair in pairs)
 
@@ -161,6 +171,40 @@ class TestPrepareSkillTrainingDataset:
 
         assert pairs == []
 
+    def test_can_disable_curriculum_examples(self):
+        from cogmem.config import CogMemConfig
+
+        episodes = [
+            {
+                "episode_id": "ep_a",
+                "task_description": "parse json",
+                "task_type": "parsing",
+                "script": "import json\njson.loads(data)\n",
+                "success": True,
+                "q_value": 0.9,
+                "episode_helpfulness": 0.9,
+                "manifest_id": "manifest_a",
+            },
+        ]
+        card = {
+            "skill_id": "skill_parse",
+            "manifest_ids": ["manifest_a"],
+            "evidence_episode_ids": ["ep_a"],
+            "task_type": "parsing",
+            "domain": "json_xml",
+            "confidence": 0.8,
+            "transfer_gain": 0.5,
+        }
+
+        pairs = prepare_skill_training_dataset(
+            [card],
+            episodes,
+            config=CogMemConfig(skill_curriculum_examples_per_card=0),
+        )
+
+        assert len(pairs) == 1
+        assert pairs[0]["source_kind"] == "skill_evidence"
+
 
 class TestSkillCardToTrainingPairs:
     def test_merges_episode_and_card_signal_into_weight(self):
@@ -185,6 +229,39 @@ class TestSkillCardToTrainingPairs:
         assert len(pairs) == 1
         assert pairs[0]["weight"] > 0.6
         assert pairs[0]["skill_confidence"] == 0.9
+
+
+class TestSkillCardToCurriculumPair:
+    def test_builds_generalized_instruction_from_card(self):
+        episode = {
+            "episode_id": "ep_1",
+            "task_description": "read csv from disk",
+            "task_type": "file_io",
+            "script": "import pandas as pd\npd.read_csv(path)\n",
+            "success": True,
+            "q_value": 0.6,
+            "episode_helpfulness": 0.6,
+        }
+        card = {
+            "skill_id": "skill_csv",
+            "task_type": "file_io",
+            "domain": "pandas",
+            "triggers": ["csv", "pandas", "read"],
+            "plan_steps": ["validate the input path", "load the file with pandas"],
+            "anti_patterns": ["avoid FileNotFoundError failure modes"],
+            "evidence_episode_ids": ["ep_1"],
+            "confidence": 0.9,
+            "transfer_gain": 0.7,
+        }
+
+        pair = skill_card_to_curriculum_pair(card, {"ep_1": episode})
+
+        assert pair is not None
+        assert pair["source_kind"] == "skill_curriculum"
+        assert "Follow this procedure:" in pair["instruction"]
+        assert "Avoid these mistakes:" in pair["instruction"]
+        assert "file_io" in pair["instruction"]
+        assert pair["response"] == episode["script"]
 
 
 class TestSaveAsJsonl:

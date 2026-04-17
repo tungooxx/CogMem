@@ -24,6 +24,8 @@ def test_default_config():
     assert cfg.skills_dir == "results/skills"
     assert cfg.skill_min_evidence == 3
     assert cfg.skill_confidence_threshold == 0.6
+    assert cfg.skill_curriculum_examples_per_card == 1
+    assert cfg.skill_curriculum_include_anti_patterns is True
     assert cfg.adapter_registry_path == "results/adapters/registry.json"
     assert cfg.adapter_route_allow_global is True
 

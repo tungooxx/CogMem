@@ -50,6 +50,90 @@ def _skill_card_manifest_eligible(card: dict, config) -> bool:
     return True
 
 
+def _best_evidence_episode(
+    card: dict,
+    episodes_by_id: dict[str, dict],
+) -> dict | None:
+    evidence = [
+        episodes_by_id[episode_id]
+        for episode_id in (card.get("evidence_episode_ids", []) or [])
+        if episode_id in episodes_by_id
+    ]
+    if not evidence:
+        return None
+    return max(evidence, key=lambda episode: get_episode_helpfulness(episode, 0.0))
+
+
+def _build_skill_curriculum_instruction(
+    card: dict,
+    *,
+    include_anti_patterns: bool = True,
+) -> str:
+    task_type = card.get("task_type") or "general"
+    domain = card.get("domain") or "general"
+    triggers = [str(item).strip() for item in (card.get("triggers", []) or []) if str(item).strip()]
+    plan_steps = [str(item).strip() for item in (card.get("plan_steps", []) or []) if str(item).strip()]
+    anti_patterns = [str(item).strip() for item in (card.get("anti_patterns", []) or []) if str(item).strip()]
+
+    lines = [
+        f"Write Python code for a {task_type} task in the {domain} domain.",
+    ]
+    if triggers:
+        lines.append("This pattern is especially useful when the task involves: " + ", ".join(triggers[:5]) + ".")
+    if plan_steps:
+        lines.append("Follow this procedure:")
+        for idx, step in enumerate(plan_steps[:5], start=1):
+            lines.append(f"{idx}. {step}")
+    if include_anti_patterns and anti_patterns:
+        lines.append("Avoid these mistakes:")
+        for pattern in anti_patterns[:4]:
+            lines.append(f"- {pattern}")
+    return "\n".join(lines)
+
+
+def skill_card_to_curriculum_pair(
+    card: dict,
+    episodes_by_id: dict[str, dict],
+    *,
+    include_anti_patterns: bool = True,
+) -> dict | None:
+    """Create one generalized curriculum example from a promoted skill card."""
+    best_episode = _best_evidence_episode(card, episodes_by_id)
+    if best_episode is None:
+        return None
+    response = (
+        best_episode.get("final_code")
+        or best_episode.get("generated_code")
+        or best_episode.get("script")
+    )
+    if not response:
+        return None
+
+    confidence = _clamp01(card.get("confidence", 0.0))
+    transfer_gain = _clamp01(card.get("transfer_gain", 0.0))
+    best_helpfulness = _clamp01(get_episode_helpfulness(best_episode, 0.0))
+    return {
+        "instruction": _build_skill_curriculum_instruction(
+            card,
+            include_anti_patterns=include_anti_patterns,
+        ),
+        "response": response,
+        "weight": max(
+            0.01,
+            min(
+                1.0,
+                0.45 * confidence + 0.35 * transfer_gain + 0.20 * best_helpfulness,
+            ),
+        ),
+        "success": True,
+        "source_episode": best_episode["episode_id"],
+        "source_skill_card": card["skill_id"],
+        "source_kind": "skill_curriculum",
+        "skill_confidence": confidence,
+        "skill_transfer_gain": float(card.get("transfer_gain", 0.0) or 0.0),
+    }
+
+
 def skill_card_to_training_pairs(
     card: dict,
     episodes_by_id: dict[str, dict],
@@ -78,6 +162,7 @@ def skill_card_to_training_pairs(
             ),
         )
         pair["source_skill_card"] = card["skill_id"]
+        pair["source_kind"] = "skill_evidence"
         pair["skill_confidence"] = confidence
         pair["skill_transfer_gain"] = float(card.get("transfer_gain", 0.0) or 0.0)
         pairs.append(pair)
@@ -94,6 +179,8 @@ def prepare_skill_training_dataset(
     """Build SFT pairs from promoted skill cards, backed by evidence episodes."""
     eligible_episodes = filter_manifest_eligible(episodes, config) if config is not None else list(episodes)
     episodes_by_id = {ep["episode_id"]: ep for ep in eligible_episodes if ep.get("episode_id")}
+    curriculum_examples_per_card = int(getattr(config, "skill_curriculum_examples_per_card", 1) or 0)
+    include_anti_patterns = bool(getattr(config, "skill_curriculum_include_anti_patterns", True))
 
     pairs: list[dict] = []
     for card in skill_cards:
@@ -106,6 +193,14 @@ def prepare_skill_training_dataset(
                 include_failures=include_failures,
             )
         )
+        if curriculum_examples_per_card > 0:
+            curriculum_pair = skill_card_to_curriculum_pair(
+                card,
+                episodes_by_id,
+                include_anti_patterns=include_anti_patterns,
+            )
+            if curriculum_pair is not None:
+                pairs.extend([curriculum_pair] * curriculum_examples_per_card)
 
     if replay_buffer:
         for example in replay_buffer:
@@ -117,6 +212,7 @@ def prepare_skill_training_dataset(
                 "weight": 1.0,
                 "source_episode": "replay",
                 "source_skill_card": "replay",
+                "source_kind": "replay",
             })
 
     return pairs
