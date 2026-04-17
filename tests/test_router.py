@@ -37,7 +37,12 @@ class TestRouteTask:
     def test_routes_to_episodic_when_not_consolidated(self, config):
         task_embedding = [0.9] * 384
         episodes = [
-            {"intent_embedding": [0.85] * 384, "q_value": 0.8, "episode_id": "ep_1"}
+            {
+                "intent_embedding": [0.85] * 384,
+                "q_value": 0.8,
+                "episode_helpfulness": 0.8,
+                "episode_id": "ep_1",
+            }
         ]
         result = route_task(
             task_embedding=task_embedding,

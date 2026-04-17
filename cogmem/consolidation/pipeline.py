@@ -32,6 +32,7 @@ from cogmem.consolidation.verify import (
     verification_passed,
 )
 from cogmem.memory.memory_bank import MemoryBank
+from cogmem.memory.schema import get_episode_helpfulness
 from cogmem.utils.logging import save_results
 
 
@@ -289,6 +290,7 @@ def run_consolidation(
         "policy": policy_name,
         "episodes_selected": len(selected),
         "training_pairs": len(training_pairs),
+        "episode_helpfulness_mean": mean([get_episode_helpfulness(ep) for ep in selected]) if selected else 0,
         "q_value_mean": mean([ep["q_value"] for ep in selected]) if selected else 0,
         "verification": verification,
         "train_result": train_result,

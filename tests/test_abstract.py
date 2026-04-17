@@ -17,6 +17,12 @@ class TestEpisodeToTrainingPair:
         assert pair["weight"] == ep["q_value"]
         assert pair["source_episode"] == ep["episode_id"]
 
+    def test_prefers_episode_helpfulness_when_present(self, sample_episodes):
+        ep = dict(sample_episodes[0])
+        ep["episode_helpfulness"] = 0.61
+        pair = episode_to_training_pair(ep)
+        assert pair["weight"] == 0.61
+
     def test_skips_failed_episodes(self, sample_episodes):
         ep = sample_episodes[7]  # failed
         pair = episode_to_training_pair(ep)

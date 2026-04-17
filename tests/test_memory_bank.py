@@ -13,6 +13,7 @@ class TestMemoryBankLoad:
         ep = bank.get("ep_001")
         assert ep["task_type"] == "clean"
         assert ep["q_value"] == 0.92
+        assert ep["episode_helpfulness"] == 0.92
 
     def test_get_missing_returns_none(self, sample_memory_bank_path):
         bank = MemoryBank.load(sample_memory_bank_path)
@@ -78,5 +79,6 @@ class TestMemoryBankMetrics:
         assert 0 < m["success_rate"] < 1
         assert "clean" in m["success_rate_by_type"]
         assert "mean" in m["q_value_stats"]
+        assert "mean" in m["episode_helpfulness_stats"]
         assert "high_q_episodes" in m
         assert "low_q_episodes" in m

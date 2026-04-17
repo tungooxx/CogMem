@@ -15,6 +15,7 @@ from pathlib import Path
 
 from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import extract_code, format_messages
+from cogmem.memory.schema import set_episode_helpfulness
 
 
 # -------------------------------------------------------------------------
@@ -129,7 +130,7 @@ def _make_episode(
         ).encode("utf-8")
     ).hexdigest()
 
-    return {
+    episode = {
         "episode_id": f"bigcode_{task['task_id'].replace('/', '_')}_{int(time.time())}",
         "task_id": task["task_id"],
         "task_type": "bigcodebench",
@@ -138,7 +139,6 @@ def _make_episode(
         "generated_code": last_code,
         "final_code": final_code,
         "success": success,
-        "q_value": 1.0 if success else 0.0,  # outcome-based initial signal
         "split_name": task.get("split_name"),
         "manifest_id": task.get("manifest_id"),
         "task_hash": task_hash,
@@ -149,6 +149,8 @@ def _make_episode(
         "num_attempts": len(trajectory),
         "timestamp": time.time(),
     }
+    set_episode_helpfulness(episode, 1.0 if success else 0.0, mirror_legacy_q_value=True)
+    return episode
 
 
 # -------------------------------------------------------------------------

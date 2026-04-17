@@ -14,6 +14,7 @@ import re
 from collections import Counter
 
 from cogmem.benchmarks.bigcodebench.prompts import format_for_training
+from cogmem.memory.schema import get_episode_helpfulness
 
 
 def categorize_domain(code: str, task_desc: str) -> str:
@@ -107,7 +108,7 @@ def build_experience_summary(
     # Sort by Q-value: high-Q episodes first (most trustworthy)
     sorted_success = sorted(
         success_episodes,
-        key=lambda ep: ep.get("q_value", 0.5),
+        key=lambda ep: get_episode_helpfulness(ep, 0.5),
         reverse=True,
     )
     sorted_failures = sorted(
@@ -117,13 +118,13 @@ def build_experience_summary(
     )
 
     # High-Q successes are most reliable for pattern extraction
-    high_q = [ep for ep in sorted_success if ep.get("q_value", 0.5) >= 0.6]
+    high_q = [ep for ep in sorted_success if get_episode_helpfulness(ep, 0.5) >= 0.6]
     imports = extract_import_patterns(high_q or sorted_success)
     errors = extract_common_errors(sorted_failures)
     patterns = extract_function_patterns(high_q or sorted_success)
 
     # Q-value stats
-    q_vals = [ep.get("q_value", 0.5) for ep in success_episodes]
+    q_vals = [get_episode_helpfulness(ep, 0.5) for ep in success_episodes]
     avg_q = sum(q_vals) / len(q_vals) if q_vals else 0.5
     n_high_q = len(high_q)
 
@@ -182,17 +183,17 @@ def generate_llm_summary(
     """
     # Split by Q-value credibility
     high_q = sorted(
-        [ep for ep in success_episodes if ep.get("q_value", 0.5) >= 0.6],
-        key=lambda ep: ep.get("q_value", 0), reverse=True,
+        [ep for ep in success_episodes if get_episode_helpfulness(ep, 0.5) >= 0.6],
+        key=lambda ep: get_episode_helpfulness(ep, 0.0), reverse=True,
     )
-    low_q = [ep for ep in success_episodes if ep.get("q_value", 0.5) < 0.4]
+    low_q = [ep for ep in success_episodes if get_episode_helpfulness(ep, 0.5) < 0.4]
 
     def format_eps(eps, n=3, show_q=True):
         text = ""
         for ep in eps[:n]:
             code = ep.get("final_code") or ep.get("generated_code") or ""
             desc = ep.get("task_description", "")[:100]
-            q = ep.get("q_value", 0.5)
+            q = get_episode_helpfulness(ep, 0.5)
             q_str = f" (Q={q:.2f})" if show_q else ""
             text += f"\nTask: {desc}{q_str}\nCode:\n{code[:300]}\n"
         return text or "\n(none)\n"
@@ -307,7 +308,7 @@ def build_sft_data_with_summaries(
             user_content = desc
 
         # Q-weighted copies: high-Q episodes get more training weight
-        q = max(ep.get("q_value", 0.5), 0.0)
+        q = max(get_episode_helpfulness(ep, 0.5), 0.0)
         copies = max(1, round(q * 5))
 
         pair = {

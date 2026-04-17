@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from cogmem.memory.schema import get_episode_helpfulness
+
 
 @dataclass
 class ConsolidatedDomain:
@@ -40,7 +42,7 @@ def route_task(
                 sim = _cosine_sim(task_embedding, emb)
                 scored.append((sim, ep))
         scored.sort(key=lambda x: x[0], reverse=True)
-        if scored and scored[0][1].get("q_value", 0) > config.retrieval_min_q:
+        if scored and get_episode_helpfulness(scored[0][1], 0.0) > config.retrieval_min_q:
             top_episodes = [ep for _, ep in scored[:3]]
             return ("episodic", top_episodes)
 

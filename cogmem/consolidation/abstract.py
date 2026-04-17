@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from cogmem.consolidation.select import filter_manifest_eligible
+from cogmem.memory.schema import get_episode_helpfulness
 
 
 def episode_to_training_pair(episode: dict, include_failures: bool = False) -> dict | None:
@@ -19,7 +20,7 @@ def episode_to_training_pair(episode: dict, include_failures: bool = False) -> d
     return {
         "instruction": episode["task_description"],
         "response": episode["script"],
-        "weight": max(episode.get("q_value", 0.0), 0.01),
+        "weight": max(get_episode_helpfulness(episode, 0.0), 0.01),
         "success": episode.get("success", False),
         "source_episode": episode["episode_id"],
     }
@@ -139,11 +140,11 @@ def prepare_preference_dataset(
         if len(eps) < 2:
             continue
 
-        eps.sort(key=lambda x: x.get("q_value", 0), reverse=True)
+        eps.sort(key=lambda x: get_episode_helpfulness(x, 0.0), reverse=True)
         best = eps[0]
         worst = eps[-1]
 
-        if best.get("q_value", 0) - worst.get("q_value", 0) < config.min_q_gap:
+        if get_episode_helpfulness(best, 0.0) - get_episode_helpfulness(worst, 0.0) < config.min_q_gap:
             continue
 
         best_code = (best.get("final_code")

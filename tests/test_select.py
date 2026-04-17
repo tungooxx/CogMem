@@ -18,7 +18,7 @@ def config():
 class TestQTopK:
     def test_selects_above_threshold(self, sample_episodes, config):
         selected = select_q_top_k(sample_episodes, config)
-        assert all(ep["q_value"] >= 0.7 for ep in selected)
+        assert all(ep.get("episode_helpfulness", ep["q_value"]) >= 0.7 for ep in selected)
 
     def test_sorted_by_q_descending(self, sample_episodes, config):
         selected = select_q_top_k(sample_episodes, config)

@@ -1,5 +1,7 @@
 import random as _random
 
+from cogmem.memory.schema import get_episode_helpfulness
+
 
 def filter_manifest_eligible(episodes: list[dict], config) -> list[dict]:
     """Filter episodes to manifests explicitly allowed by config."""
@@ -27,9 +29,9 @@ def filter_manifest_eligible(episodes: list[dict], config) -> list[dict]:
 
 def select_q_top_k(episodes: list[dict], config) -> list[dict]:
     eligible = filter_manifest_eligible(episodes, config)
-    sorted_eps = sorted(eligible, key=lambda x: x["q_value"], reverse=True)
+    sorted_eps = sorted(eligible, key=lambda x: get_episode_helpfulness(x), reverse=True)
     if config.q_threshold is not None:
-        selected = [ep for ep in sorted_eps if ep["q_value"] >= config.q_threshold]
+        selected = [ep for ep in sorted_eps if get_episode_helpfulness(ep) >= config.q_threshold]
         if selected:
             return selected
     # Fallback: take top 25% by Q-value
