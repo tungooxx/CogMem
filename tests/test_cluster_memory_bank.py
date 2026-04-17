@@ -4,11 +4,16 @@ import numpy as np
 import torch
 
 from cogmem.patches.memory_bank import (
+    EpisodeRecord,
     ClusterMemory,
     ClusterMemoryBank,
     _apply_redundancy_penalties,
     _apply_sleep_promotion_policies,
+    _apply_retrieval_thresholds,
+    _distill_and_score_memory,
+    _extract_structural_markers,
     _recompute_q_values,
+    compute_applicability,
     compute_top_contrast_directions,
     score_memory_final_use,
 )
@@ -77,7 +82,7 @@ def test_build_memories_keeps_existing_bank_when_no_eligible_episodes(tmp_path):
     ]
     before_stats = bank.stats()
 
-    stats = bank.build_memories(_dummy_model(), tokenizer=None)
+    stats = bank.build_memories(_dummy_model(), tokenizer=None, control_episodes=1)
 
     assert stats == before_stats
     assert len(bank.memories) == 1
@@ -376,6 +381,56 @@ def test_structural_match_can_break_similarity_tie(tmp_path):
     assert selected[0].memory_id == "memory_sort"
 
 
+def test_extract_structural_markers_filters_prompt_template_tokens():
+    markers = _extract_structural_markers(
+        [
+            "Starting code contained import matplotlib and task_func should draw a histogram",
+            "Contained starter code uses matplotlib so task_func builds a histogram plot",
+            "Write task_func with matplotlib to render histogram bins",
+        ],
+        negative_prompts=[
+            "Starting code contained import socket and task_func should scan a port",
+            "Contained starter code uses urllib so task_func parses a url",
+        ],
+    )
+
+    assert "histogram" in markers
+    assert "matplotlib" in markers
+    assert "task_func" not in markers
+    assert "contained" not in markers
+    assert "starting" not in markers
+    assert "import" not in markers
+
+
+def test_hard_negative_margin_penalizes_ambiguous_applicability():
+    memory = ClusterMemory(
+        memory_id="memory_plot",
+        family_label="plotting",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        positive_prototype=[1.0, 0.0],
+        negative_prototype=[0.7, 0.714],
+        structural_markers=["histogram"],
+    )
+
+    clean = compute_applicability(
+        memory,
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        "plot a histogram",
+    )
+    ambiguous = compute_applicability(
+        memory,
+        np.asarray([0.92, 0.39], dtype=np.float32),
+        "plot a histogram",
+    )
+
+    assert clean > ambiguous
+    assert ambiguous < 0.4
+
+
 def test_retrievable_payload_groups_metadata_evidence_and_transfer_stats():
     memory = ClusterMemory(
         memory_id="memory_transfer",
@@ -608,6 +663,56 @@ def test_update_memory_utility_recomputes_retrieval_threshold(tmp_path):
     assert bank.memories[0].retrieval_threshold != 0.0
 
 
+def test_apply_retrieval_thresholds_stays_above_hard_negative_scores():
+    positives = [
+        EpisodeRecord("ep1", "t1", [1.0, 0.0], "plot histogram", "plotting", "fail", "pass", 0.8),
+        EpisodeRecord("ep2", "t2", [0.99, 0.01], "plot histogram", "plotting", "fail", "pass", 0.8),
+        EpisodeRecord("ep3", "t3", [0.98, 0.02], "plot histogram", "plotting", "fail", "pass", 0.8),
+    ]
+    hard_negative = EpisodeRecord(
+        "ep_hard",
+        "t4",
+        [0.97, 0.03],
+        "plot histogram",
+        "plotting",
+        "fail",
+        "pass",
+        0.8,
+    )
+    unrelated = EpisodeRecord(
+        "ep_other",
+        "t5",
+        [0.0, 1.0],
+        "open a socket on a port",
+        "networking",
+        "fail",
+        "pass",
+        0.8,
+    )
+    memory = ClusterMemory(
+        memory_id="memory_plot",
+        family_label="plotting",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=["ep1", "ep2", "ep3"],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        positive_prototype=[1.0, 0.0],
+        negative_prototype=[0.97, 0.03],
+        negative_episode_ids=["ep_hard"],
+        structural_markers=["histogram"],
+    )
+
+    _apply_retrieval_thresholds([memory], positives + [hard_negative, unrelated])
+
+    hard_negative_score = compute_applicability(
+        memory,
+        np.asarray(hard_negative.task_embedding, dtype=np.float32),
+        hard_negative.prompt,
+    )
+    assert memory.retrieval_threshold > hard_negative_score
+
+
 def test_load_patches_for_memories_uses_final_use_score(tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     patch = CognitivePatch(
@@ -651,6 +756,114 @@ def test_load_patches_for_memories_uses_final_use_score(tmp_path):
     assert loaded[0].q_value != memory.promotion_score
 
 
+def test_distill_transfer_gain_uses_out_of_cluster_examples(monkeypatch, tmp_path):
+    bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
+    train_a = bank.record_episode(
+        task_id="BigCodeBench/1",
+        prompt="cluster train a",
+        task_embedding=[1.0, 0.0],
+        failed_code="fail_a",
+        passed_code="pass_a",
+        pass_fail_similarity=0.8,
+    )
+    train_b = bank.record_episode(
+        task_id="BigCodeBench/2",
+        prompt="cluster train b",
+        task_embedding=[0.99, 0.01],
+        failed_code="fail_b",
+        passed_code="pass_b",
+        pass_fail_similarity=0.8,
+    )
+    holdout = bank.record_episode(
+        task_id="BigCodeBench/3",
+        prompt="cluster holdout",
+        task_embedding=[0.98, 0.02],
+        failed_code="fail_c",
+        passed_code="pass_c",
+        pass_fail_similarity=0.8,
+    )
+    transfer = bank.record_episode(
+        task_id="BigCodeBench/4",
+        prompt="cluster transfer",
+        task_embedding=[0.96, 0.04],
+        failed_code="fail_d",
+        passed_code="pass_d",
+        pass_fail_similarity=0.8,
+    )
+    hard_negative = bank.record_episode(
+        task_id="BigCodeBench/5",
+        prompt="cluster hard negative",
+        task_embedding=[0.97, 0.03],
+        failed_code="fail_e",
+        passed_code="pass_e",
+        pass_fail_similarity=0.8,
+        family_label="general_code",
+    )
+    control = bank.record_episode(
+        task_id="BigCodeBench/6",
+        prompt="cluster control",
+        task_embedding=[0.0, 1.0],
+        failed_code="fail_f",
+        passed_code="pass_f",
+        pass_fail_similarity=0.8,
+        family_label="networking",
+    )
+
+    memory = ClusterMemory(
+        memory_id="memory_transfer",
+        family_label="general_code",
+        centroid_embedding=[1.0, 0.0],
+        member_episode_ids=[train_a.episode_id, train_b.episode_id, holdout.episode_id],
+        support_count=3,
+        layer_window=[4, 5, 6, 7],
+        token_window=64,
+        positive_prototype=[1.0, 0.0],
+        negative_episode_ids=[hard_negative.episode_id],
+    )
+
+    def fake_create_patch(*args, **kwargs):
+        patch = CognitivePatch(
+            patch_id=kwargs["patch_id"],
+            embedding=[1.0, 0.0],
+            lora_weights={"layer": {"A": torch.zeros((1, 1)), "B": torch.zeros((1, 1))}},
+        )
+        stats = SimpleNamespace(total_steps=1, final_loss=0.1, loss_history=[])
+        return patch, stats
+
+    def fake_gain(*args, **kwargs):
+        prompt = args[3]
+        if "holdout" in prompt:
+            return 0.1
+        if "transfer" in prompt:
+            return 0.8
+        if "hard negative" in prompt:
+            return -0.6
+        if "control" in prompt:
+            return -0.4
+        return 0.2
+
+    monkeypatch.setattr("cogmem.patches.memory_bank.create_patch_from_cluster", fake_create_patch)
+    monkeypatch.setattr("cogmem.patches.memory_bank._measure_patch_teacher_forcing_gain", fake_gain)
+
+    _distill_and_score_memory(
+        memory,
+        [train_a, train_b, holdout],
+        bank.episodes,
+        bank.artifact_bank,
+        _dummy_model(),
+        tokenizer=None,
+        distill_rank=4,
+        distill_steps=1,
+        distill_lr=0.1,
+        control_episodes=1,
+    )
+
+    assert memory.held_out_steering_gain == 0.1
+    assert memory.transfer_gain == 0.8
+    assert memory.transfer_rate == 1.0
+    assert memory.negative_steering_penalty == 0.5
+
+
 def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp_path):
     bank = ClusterMemoryBank(str(tmp_path / "cluster_memories"))
     for idx in range(3):
@@ -662,6 +875,22 @@ def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp
             passed_code=f"pass_{idx}",
             pass_fail_similarity=0.8,
         )
+    bank.record_episode(
+        task_id="BigCodeBench/99",
+        prompt="Open a socket on a port",
+        task_embedding=[0.0, 1.0, 0.0],
+        failed_code="fail_extra",
+        passed_code="pass_extra",
+        pass_fail_similarity=0.8,
+    )
+    bank.record_episode(
+        task_id="BigCodeBench/100",
+        prompt="Hash bytes into hex",
+        task_embedding=[0.0, 0.0, 1.0],
+        failed_code="fail_extra_two",
+        passed_code="pass_extra_two",
+        pass_fail_similarity=0.8,
+    )
 
     monkeypatch.setattr(
         "cogmem.patches.memory_bank._compute_episode_delta",
@@ -687,7 +916,7 @@ def test_build_memories_distills_and_retrieves_positive_cluster(monkeypatch, tmp
         lambda *args, **kwargs: 0.4,
     )
 
-    stats = bank.build_memories(_dummy_model(), tokenizer=None)
+    stats = bank.build_memories(_dummy_model(), tokenizer=None, control_episodes=1)
 
     assert stats["memories"] == 1
     assert bank.memories[0].retrievable is True

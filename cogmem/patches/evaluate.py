@@ -12,7 +12,7 @@ from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT, extract_code
 from cogmem.patches.compose import PatchedModel
 from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
-from cogmem.patches.wake import generate_with_model
+from cogmem.patches.wake import generate_many_with_model, generate_with_model
 
 
 def evaluate_cold(
@@ -117,11 +117,15 @@ def evaluate_best_of_n(
         try:
             active_patches = memory_bank.get_active_patches(task_embedding, prompt, top_k=5)
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
-                for _ in range(n):
+                responses = generate_many_with_model(
+                    base_model,
+                    tokenizer,
+                    messages,
+                    n_candidates=n,
+                    temperature=temperature,
+                )
+                for response in responses:
                     try:
-                        response = generate_with_model(
-                            base_model, tokenizer, messages, temperature=temperature
-                        )
                         code = extract_code(response)
                         result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")
                         if result["passed"]:

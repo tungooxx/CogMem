@@ -195,9 +195,27 @@ Q_promote(m) = 0.28 * held_out_steering_gain
 Where:
 
 - `log_support` is `log(1 + support_count)` normalized by the largest support count in the bank
-- `transfer_gain` remains the held-out distillation-time signal from cluster validation
+- `transfer_gain` is now measured on non-member transfer episodes outside the support cluster
 - `transfer_online_gain` is the online success ratio from seen/unseen help-hurt counters
 - legacy `q_value` metadata now mirrors `promotion_score` for compatibility with saved patch artifacts
+
+Wake retrieval now uses an applicability gate with an explicit hard-negative margin penalty:
+
+```text
+applicability(m, q) =
+  clip(0.60 * pos_sim
+     - 0.25 * neg_sim
+     + 0.15 * structural_match
+     - 0.10 * hard_negative_margin_penalty,
+     0, 1)
+```
+
+Where:
+
+- `pos_sim` is cosine similarity to the positive prototype / centroid
+- `neg_sim` is cosine similarity to the hard-negative prototype
+- `hard_negative_margin_penalty` grows when `pos_sim - neg_sim` falls below the minimum separation margin
+- structural markers are now filtered against prompt-template tokens and discounted when they also appear in hard negatives
 
 And a memory is demoted from retrieval if:
 

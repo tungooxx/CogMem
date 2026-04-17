@@ -21,13 +21,24 @@ from cogmem.patches.compose import PatchedModel
 from cogmem.patches.memory_bank import ClusterMemoryBank, DEFAULT_PATCH_SCALE
 
 
+def _tokenize_messages(model, tokenizer, messages):
+    """Tokenize a chat prompt onto the model device."""
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    return tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=2048,
+    ).to(model.device)
+
+
 def generate_with_model(model, tokenizer, messages, temperature=0.8, max_tokens=2048):
     """Generate a response using the model directly (not Ollama)."""
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = tokenizer(text, return_tensors="pt", truncation=True,
-                       max_length=2048).to(model.device)
+    inputs = _tokenize_messages(model, tokenizer, messages)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -40,6 +51,42 @@ def generate_with_model(model, tokenizer, messages, temperature=0.8, max_tokens=
 
     gen_ids = outputs[0][inputs.input_ids.shape[1]:]
     return tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+
+def generate_many_with_model(
+    model,
+    tokenizer,
+    messages,
+    n_candidates: int,
+    temperature: float = 0.8,
+    max_tokens: int = 2048,
+):
+    """Generate multiple sampled responses in one model.generate call when possible."""
+    if n_candidates <= 1:
+        return [generate_with_model(model, tokenizer, messages, temperature=temperature, max_tokens=max_tokens)]
+
+    if temperature <= 0:
+        response = generate_with_model(model, tokenizer, messages, temperature=temperature, max_tokens=max_tokens)
+        return [response for _ in range(n_candidates)]
+
+    inputs = _tokenize_messages(model, tokenizer, messages)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            do_sample=True,
+            num_return_sequences=n_candidates,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+    prompt_len = inputs.input_ids.shape[1]
+    responses = []
+    for row in outputs:
+        gen_ids = row[prompt_len:]
+        responses.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
+    return responses
 
 
 def find_best_contrast_pair(passes, fails, min_sim=0.3, max_sim=0.95):
@@ -133,12 +180,15 @@ def run_wake_cycle(
         candidates = []
         try:
             with PatchedModel(base_model, active_patches, scaling_factor=DEFAULT_PATCH_SCALE):
-                for _ in range(n_candidates):
+                responses = generate_many_with_model(
+                    base_model,
+                    tokenizer,
+                    messages,
+                    n_candidates=n_candidates,
+                    temperature=temperature,
+                )
+                for response in responses:
                     try:
-                        response = generate_with_model(
-                            base_model, tokenizer, messages,
-                            temperature=temperature,
-                        )
                         code = extract_code(response)
                         if code and len(code.strip()) > 20:
                             result = evaluate_solution(task, code, timeout=eval_timeout, mode="subprocess")

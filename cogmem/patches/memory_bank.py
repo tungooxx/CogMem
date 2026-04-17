@@ -41,6 +41,8 @@ DEFAULT_PATCH_SCALE = 0.25
 DEFAULT_APPLICABILITY_POS_WEIGHT = 0.60
 DEFAULT_APPLICABILITY_NEG_WEIGHT = 0.25
 DEFAULT_APPLICABILITY_STRUCT_WEIGHT = 0.15
+DEFAULT_APPLICABILITY_MARGIN_WEIGHT = 0.10
+DEFAULT_APPLICABILITY_MIN_MARGIN = 0.08
 DEFAULT_USE_TRANSFER_WEIGHT = 0.45
 DEFAULT_USE_RECENT_SUCCESS_WEIGHT = 0.20
 DEFAULT_USE_REUSE_WEIGHT = 0.15
@@ -53,12 +55,16 @@ DEFAULT_SLEEP_PROMOTE_MIN_SUPPORT = 3
 DEFAULT_SLEEP_PRUNE_MAX_SCORE = 0.10
 DEFAULT_RETRIEVE_NEGATIVE_POOL = 8
 DEFAULT_RETRIEVE_MARKERS = 8
+DEFAULT_HARD_NEGATIVE_MARGIN = 0.02
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "code", "column", "data",
     "def", "display", "draw", "each", "file", "for", "from", "function", "if",
     "in", "input", "list", "make", "number", "of", "on", "or", "output", "path",
     "plot", "return", "save", "self", "set", "should", "specified", "that", "the",
     "then", "this", "to", "using", "value", "with", "write", "you", "your",
+    "contained", "contains", "import", "imports", "python", "starting", "task",
+    "task_func", "module", "package", "library", "script", "program", "complete",
+    "prompt", "entry", "point", "starting_code",
 }
 
 
@@ -293,6 +299,17 @@ class ClusterMemoryBank:
                     np.stack(deltas, axis=0),
                     top_k=top_directions,
                 )
+                negative_episode_ids, negative_prototype = _compute_negative_prototype(
+                    centroid,
+                    group,
+                    eligible,
+                    limit=max(control_episodes, 1),
+                )
+                negative_prompts = [
+                    episode.prompt
+                    for episode in eligible
+                    if episode.episode_id in set(negative_episode_ids)
+                ]
                 memory = ClusterMemory(
                     memory_id=_make_memory_id(group),
                     family_label=group[0].family_label,
@@ -306,17 +323,12 @@ class ClusterMemoryBank:
                     negative_prototype=[],
                     structural_markers=_extract_structural_markers(
                         [ep.prompt for ep in group],
+                        negative_prompts=negative_prompts,
                     ),
                     top_contrast_directions=[direction.tolist() for direction in directions],
                     explained_variance=explained,
                     created_at=max(ep.created_at for ep in group),
                 )
-                negative_episode_ids, negative_prototype = _compute_negative_prototype(
-                        centroid,
-                        group,
-                        eligible,
-                        limit=max(control_episodes, 1),
-                    )
                 memory.negative_episode_ids = negative_episode_ids
                 memory.negative_prototype = negative_prototype
                 _distill_and_score_memory(
@@ -657,17 +669,32 @@ def _prompt_feature_tokens(prompt: str) -> list[str]:
 
 def _extract_structural_markers(
     prompts: list[str],
+    negative_prompts: list[str] | None = None,
     max_markers: int = DEFAULT_RETRIEVE_MARKERS,
 ) -> list[str]:
-    counts: dict[str, int] = {}
+    positive_counts: dict[str, int] = {}
     for prompt in prompts:
         for token in set(_prompt_feature_tokens(prompt)):
-            counts[token] = counts.get(token, 0) + 1
+            positive_counts[token] = positive_counts.get(token, 0) + 1
+    negative_counts: dict[str, int] = {}
+    for prompt in negative_prompts or []:
+        for token in set(_prompt_feature_tokens(prompt)):
+            negative_counts[token] = negative_counts.get(token, 0) + 1
+    positive_total = max(len(prompts), 1)
+    negative_total = max(len(negative_prompts or []), 1)
+    ranked: list[tuple[float, int, float, str]] = []
+    for token, positive_count in positive_counts.items():
+        positive_rate = positive_count / positive_total
+        negative_rate = negative_counts.get(token, 0) / negative_total if negative_prompts else 0.0
+        discriminative_score = positive_rate - 0.75 * negative_rate
+        if discriminative_score <= 0.0:
+            continue
+        ranked.append((discriminative_score, positive_count, -negative_rate, token))
     ranked = sorted(
-        counts.items(),
-        key=lambda item: (-item[1], item[0]),
+        ranked,
+        key=lambda item: (-item[0], -item[1], item[2], item[3]),
     )
-    return [token for token, _ in ranked[:max_markers]]
+    return [token for _, _, _, token in ranked[:max_markers]]
 
 
 def compute_structural_match(task_prompt: str, memory: ClusterMemory) -> float:
@@ -697,10 +724,22 @@ def compute_applicability(
         negative_similarity = cosine_similarity(query_embedding, negative)
 
     structural_match = compute_structural_match(task_prompt, memory)
+    margin_penalty = 0.0
+    if memory.negative_prototype:
+        similarity_margin = positive_similarity - negative_similarity
+        margin_penalty = float(
+            np.clip(
+                (DEFAULT_APPLICABILITY_MIN_MARGIN - similarity_margin)
+                / max(DEFAULT_APPLICABILITY_MIN_MARGIN, 1e-8),
+                0.0,
+                1.0,
+            )
+        )
     applicability = (
         DEFAULT_APPLICABILITY_POS_WEIGHT * positive_similarity
         - DEFAULT_APPLICABILITY_NEG_WEIGHT * negative_similarity
         + DEFAULT_APPLICABILITY_STRUCT_WEIGHT * structural_match
+        - DEFAULT_APPLICABILITY_MARGIN_WEIGHT * margin_penalty
     )
     return float(np.clip(applicability, 0.0, 1.0))
 
@@ -856,12 +895,43 @@ def _compute_negative_prototype(
     return [episode.episode_id for episode in selected], prototype.astype(np.float32).tolist()
 
 
+def _select_transfer_episodes(
+    centroid: np.ndarray,
+    group: list[EpisodeRecord],
+    all_episodes: list[EpisodeRecord],
+    family_label: str,
+    hard_negative_ids: list[str],
+    limit: int,
+) -> list[EpisodeRecord]:
+    member_ids = {episode.episode_id for episode in group}
+    excluded_ids = member_ids | set(hard_negative_ids)
+    candidates = [
+        episode for episode in all_episodes
+        if episode.episode_id not in excluded_ids and episode.success and episode.passed_code.strip()
+    ]
+    if not candidates:
+        return []
+    ranked = sorted(
+        candidates,
+        key=lambda episode: (
+            1 if episode.family_label == family_label else 0,
+            cosine_similarity(
+                centroid,
+                np.asarray(episode.task_embedding, dtype=np.float32),
+            ),
+        ),
+        reverse=True,
+    )
+    return ranked[:max(limit, 1)]
+
+
 def _apply_retrieval_thresholds(
     memories: list[ClusterMemory],
     episodes: list[EpisodeRecord],
 ) -> None:
     episode_by_id = {episode.episode_id: episode for episode in episodes}
     for memory in memories:
+        member_id_set = set(memory.member_episode_ids)
         positive_examples = [
             episode_by_id[episode_id]
             for episode_id in memory.member_episode_ids
@@ -883,7 +953,12 @@ def _apply_retrieval_thresholds(
 
         negative_pool = [
             episode for episode in episodes
-            if episode.episode_id not in set(memory.member_episode_ids)
+            if episode.episode_id not in member_id_set
+        ]
+        hard_negative_examples = [
+            episode_by_id[episode_id]
+            for episode_id in memory.negative_episode_ids
+            if episode_id in episode_by_id and episode_id not in member_id_set
         ]
         negative_scores = sorted(
             (
@@ -896,9 +971,22 @@ def _apply_retrieval_thresholds(
             ),
             reverse=True,
         )[:DEFAULT_RETRIEVE_NEGATIVE_POOL]
+        hard_negative_scores = [
+            compute_applicability(
+                memory,
+                np.asarray(episode.task_embedding, dtype=np.float32),
+                episode.prompt,
+            )
+            for episode in hard_negative_examples
+        ]
 
         positive_anchor = float(np.percentile(positive_scores, 25))
         negative_anchor = float(np.percentile(negative_scores, 85)) if negative_scores else 0.0
+        if hard_negative_scores:
+            negative_anchor = max(
+                negative_anchor,
+                float(np.percentile(hard_negative_scores, 85)) + DEFAULT_HARD_NEGATIVE_MARGIN,
+            )
         midpoint = (positive_anchor + negative_anchor) / 2.0
         memory.retrieval_threshold = float(np.clip(midpoint, -1.0, 1.0))
         if memory.retrieval_threshold >= max(positive_scores):
@@ -1059,6 +1147,40 @@ def _distill_and_score_memory(
         )
         for episode in train_eps
     ]
+    centroid = np.asarray(memory.positive_prototype or memory.centroid_embedding, dtype=np.float32)
+    transfer_episodes = _select_transfer_episodes(
+        centroid,
+        group,
+        all_episodes,
+        memory.family_label,
+        memory.negative_episode_ids,
+        limit=max(control_episodes, len(holdout_eps)),
+    )
+    transfer_gains = [
+        _measure_patch_teacher_forcing_gain(
+            base_model,
+            tokenizer,
+            patch,
+            episode.prompt,
+            episode.passed_code,
+        )
+        for episode in transfer_episodes
+    ]
+    hard_negative_lookup = {
+        episode.episode_id: episode
+        for episode in all_episodes
+        if episode.episode_id in set(memory.negative_episode_ids)
+    }
+    hard_negative_gains = [
+        _measure_patch_teacher_forcing_gain(
+            base_model,
+            tokenizer,
+            patch,
+            episode.prompt,
+            episode.passed_code,
+        )
+        for episode in hard_negative_lookup.values()
+    ]
     control_gains = [
         _measure_patch_teacher_forcing_gain(
             base_model,
@@ -1076,10 +1198,10 @@ def _distill_and_score_memory(
 
     memory.local_support_gain = float(np.mean(local_gains)) if local_gains else 0.0
     memory.held_out_steering_gain = float(np.mean(holdout_gains)) if holdout_gains else 0.0
-    memory.transfer_rate = float(np.mean([gain > 0 for gain in holdout_gains])) if holdout_gains else 0.0
-    positive_holdout = [max(gain, 0.0) for gain in holdout_gains]
-    memory.transfer_gain = float(np.mean(positive_holdout)) if positive_holdout else 0.0
-    harms = [max(-gain, 0.0) for gain in control_gains]
+    memory.transfer_rate = float(np.mean([gain > 0 for gain in transfer_gains])) if transfer_gains else 0.0
+    positive_transfer = [max(gain, 0.0) for gain in transfer_gains]
+    memory.transfer_gain = float(np.mean(positive_transfer)) if positive_transfer else 0.0
+    harms = [max(-gain, 0.0) for gain in [*hard_negative_gains, *control_gains]]
     memory.negative_steering_penalty = float(np.mean(harms)) if harms else 0.0
     memory.distillation_success = 1.0 if (
         memory.local_support_gain > 0
