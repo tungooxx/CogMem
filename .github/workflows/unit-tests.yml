@@ -1,0 +1,45 @@
+name: unit-tests
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package and CPU test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pytest pytest-mock numpy scipy pyyaml openai together transformers peft sentence-transformers datasets
+          python -m pip install -e . --no-deps
+
+      - name: Run CPU unit tests
+        run: |
+          pytest \
+            tests/test_config.py \
+            tests/test_memory_schema.py \
+            tests/test_memory_bank.py \
+            tests/test_episodic_store.py \
+            tests/test_bigcodebench.py \
+            tests/test_bigcodebench_splits.py \
+            tests/test_bigcodebench_cl_eval.py \
+            tests/test_bigcodebench_experiment.py \
+            tests/test_select.py \
+            tests/test_abstract.py \
+            tests/test_skill_store.py \
+            tests/test_proceduralize.py \
+            tests/test_adapter_registry.py \
+            tests/test_router.py \
+            tests/test_train_lora.py \
+            -q
