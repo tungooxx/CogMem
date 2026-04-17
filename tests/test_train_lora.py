@@ -67,3 +67,40 @@ def test_wait_for_job_failed(mock_together_cls, config):
 
     with pytest.raises(RuntimeError, match="failed"):
         wait_for_job("ft-job-xyz", config, poll_interval=0.01)
+
+
+@patch("cogmem.consolidation.train_lora.register_adapter_artifact")
+@patch("cogmem.consolidation.train_lora.download_adapter")
+@patch("cogmem.consolidation.train_lora.wait_for_job")
+@patch("cogmem.consolidation.train_lora.start_lora_job")
+@patch("cogmem.consolidation.train_lora.upload_training_file")
+def test_train_lora_together_registers_adapter_metadata(
+    mock_upload,
+    mock_start,
+    mock_wait,
+    mock_download,
+    mock_register,
+    config,
+):
+    mock_upload.return_value = "file-abc123"
+    mock_start.return_value = "ft-job-xyz"
+    mock_wait.return_value = {"status": "completed", "model_id": "user/model-ft-xyz", "job_id": "ft-job-xyz"}
+    mock_register.return_value = type("Record", (), {"adapter_id": "adapter_123"})()
+
+    result = train_lora_together(
+        "train.jsonl",
+        config,
+        policy_name="q_top_k",
+        source_skill_card_ids=["skill_a"],
+        training_manifest_ids=["manifest_a"],
+        compatible_families=["file_io"],
+        adapter_role="family",
+        dev_gain=0.12,
+        registry_path="results/adapters/registry.json",
+    )
+
+    assert result["adapter_id"] == "adapter_123"
+    kwargs = mock_register.call_args.kwargs
+    assert kwargs["training_manifest_ids"] == ["manifest_a"]
+    assert kwargs["source_skill_card_ids"] == ["skill_a"]
+    assert kwargs["compatible_families"] == ["file_io"]

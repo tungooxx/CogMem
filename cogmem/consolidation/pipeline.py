@@ -23,6 +23,7 @@ from cogmem.consolidation.abstract import (
     prepare_training_dataset,
     save_as_jsonl,
 )
+from cogmem.consolidation.adapter_registry import AdapterRegistry
 from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
 from cogmem.consolidation.train_generator import train_generator_full
@@ -97,6 +98,23 @@ def run_qstar_cycle(
         output_path=skill_cards_path,
     )
     skill_summary = skill_store.summary()
+    promoted_cards = list(skill_store.filter(promoted=True))
+    promoted_skill_ids = [card["skill_id"] for card in promoted_cards]
+    promoted_manifest_ids = sorted(
+        {
+            manifest_id
+            for card in promoted_cards
+            for manifest_id in card.get("manifest_ids", [])
+        }
+    )
+    promoted_families = sorted(
+        {
+            family
+            for card in promoted_cards
+            for family in [card.get("task_type"), card.get("domain")]
+            if family
+        }
+    )
     print(
         f"  Skill cards: {skill_summary['total']} candidates, "
         f"{skill_summary['promoted']} promoted"
@@ -135,6 +153,11 @@ def run_qstar_cycle(
 
     generator_path = train_generator_full(
         selected, pref_dataset, config, cycle=cycle,
+        source_skill_card_ids=promoted_skill_ids,
+        training_manifest_ids=promoted_manifest_ids,
+        compatible_families=promoted_families,
+        registry_path=config.adapter_registry_path,
+        adapter_role="global",
     )
 
     # 4. Train verifier (DPO)
@@ -165,6 +188,20 @@ def run_qstar_cycle(
         verification = aggregate_seed_results(seed_results)
         print(f"  Pass rate: {verification['mean']:.1%}")
 
+    if generator_path:
+        registry = AdapterRegistry.load(config.adapter_registry_path)
+        record = registry.find_by_path(generator_path)
+        if record is not None:
+            registry.update(
+                record.adapter_id,
+                dev_gain=verification.get("mean", 0.0) if verification else 0.0,
+                metadata={
+                    **record.metadata,
+                    "verification": verification,
+                },
+            )
+            registry.save(config.adapter_registry_path)
+
     # Save results
     results = {
         "cycle": cycle,
@@ -178,6 +215,7 @@ def run_qstar_cycle(
         "skill_cards_path": skill_cards_path,
         "skill_cards_total": skill_summary["total"],
         "skill_cards_promoted": skill_summary["promoted"],
+        "adapter_registry_path": config.adapter_registry_path,
         "verification": verification,
     }
 
@@ -295,9 +333,35 @@ def run_consolidation(
     jsonl_path = save_as_jsonl(training_pairs, f"{jsonl_dir}/{policy_name}.jsonl")
 
     if config.lora_provider == "local":
-        train_result = train_lora_local(jsonl_path, config, policy_name=policy_name)
+        train_result = train_lora_local(
+            jsonl_path,
+            config,
+            policy_name=policy_name,
+            training_manifest_ids=sorted(
+                {ep.get("manifest_id") for ep in selected if ep.get("manifest_id")}
+            ),
+            compatible_families=sorted(
+                {ep.get("task_type") for ep in selected if ep.get("task_type")}
+            ),
+            registry_path=config.adapter_registry_path,
+            adapter_role="legacy_policy",
+            dev_gain=0.0,
+        )
     else:
-        train_result = train_lora_together(jsonl_path, config, policy_name=policy_name)
+        train_result = train_lora_together(
+            jsonl_path,
+            config,
+            policy_name=policy_name,
+            training_manifest_ids=sorted(
+                {ep.get("manifest_id") for ep in selected if ep.get("manifest_id")}
+            ),
+            compatible_families=sorted(
+                {ep.get("task_type") for ep in selected if ep.get("task_type")}
+            ),
+            registry_path=config.adapter_registry_path,
+            adapter_role="legacy_policy",
+            dev_gain=0.0,
+        )
 
     seed_results = []
     if run_task_fn is not None:
@@ -306,6 +370,20 @@ def run_consolidation(
             seed_results.append(r)
 
     verification = aggregate_seed_results(seed_results) if seed_results else {}
+    adapter_dir = train_result.get("adapter_dir")
+    if adapter_dir:
+        registry = AdapterRegistry.load(config.adapter_registry_path)
+        record = registry.find_by_path(adapter_dir)
+        if record is not None:
+            registry.update(
+                record.adapter_id,
+                dev_gain=verification.get("mean", 0.0) if verification else 0.0,
+                metadata={
+                    **record.metadata,
+                    "verification": verification,
+                },
+            )
+            registry.save(config.adapter_registry_path)
 
     result = {
         "policy": policy_name,

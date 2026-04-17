@@ -2,6 +2,8 @@ import time
 
 from together import Together
 
+from cogmem.consolidation.adapter_registry import register_adapter_artifact
+
 
 def _client(config) -> Together:
     return Together(api_key=config.together_api_key)
@@ -53,7 +55,16 @@ def download_adapter(job_id: str, output_dir: str, config) -> str:
 
 
 def train_lora_together(
-    jsonl_path: str, config, policy_name: str = "q_top_k"
+    jsonl_path: str,
+    config,
+    policy_name: str = "q_top_k",
+    *,
+    source_skill_card_ids: list[str] | None = None,
+    training_manifest_ids: list[str] | None = None,
+    compatible_families: list[str] | None = None,
+    adapter_role: str = "family",
+    dev_gain: float = 0.0,
+    registry_path: str | None = None,
 ) -> dict:
     file_id = upload_training_file(jsonl_path, config)
     suffix = f"cogmem-{policy_name}"
@@ -63,5 +74,23 @@ def train_lora_together(
     adapter_dir = f"{config.adapters_dir}/{policy_name}"
     download_adapter(job_id, adapter_dir, config)
     result["adapter_dir"] = adapter_dir
+    if registry_path:
+        record = register_adapter_artifact(
+            registry_path,
+            adapter_dir,
+            base_model=config.base_model,
+            adapter_role=adapter_role,
+            training_manifest_ids=training_manifest_ids or [],
+            source_skill_card_ids=source_skill_card_ids or [],
+            compatible_families=compatible_families or [],
+            dev_gain=dev_gain,
+            metadata={
+                "trainer": "together",
+                "policy_name": policy_name,
+                "job_id": job_id,
+                "jsonl_path": jsonl_path,
+            },
+        )
+        result["adapter_id"] = record.adapter_id
 
     return result

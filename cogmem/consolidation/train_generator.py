@@ -28,6 +28,8 @@ from transformers import (
     TrainingArguments,
 )
 
+from cogmem.consolidation.adapter_registry import register_adapter_artifact
+
 
 def _make_bnb_config(bits: int) -> BitsAndBytesConfig:
     if bits == 4:
@@ -57,16 +59,44 @@ def train_generator_full(
     pref_dataset: Dataset | None,
     config,
     cycle: int = 0,
+    *,
+    source_skill_card_ids: list[str] | None = None,
+    training_manifest_ids: list[str] | None = None,
+    compatible_families: list[str] | None = None,
+    registry_path: str | None = None,
+    adapter_role: str = "global",
+    dev_gain: float = 0.0,
 ) -> str:
     """Two-stage generator training: SFT then DPO.
 
     Returns path to final adapter (DPO if enough pairs, else SFT only).
     """
-    sft_path, sft_loss = train_generator_sft(sft_episodes, config, cycle)
+    sft_path, sft_loss = train_generator_sft(
+        sft_episodes,
+        config,
+        cycle,
+        source_skill_card_ids=source_skill_card_ids,
+        training_manifest_ids=training_manifest_ids,
+        compatible_families=compatible_families,
+        registry_path=registry_path,
+        adapter_role=adapter_role,
+        dev_gain=dev_gain,
+    )
     print(f"  Stage 1 (SFT): loss={sft_loss}, path={sft_path}")
 
     if pref_dataset is not None and len(pref_dataset) >= config.min_dpo_pairs:
-        dpo_path = train_generator_dpo(pref_dataset, config, cycle, sft_path)
+        dpo_path = train_generator_dpo(
+            pref_dataset,
+            config,
+            cycle,
+            sft_path,
+            source_skill_card_ids=source_skill_card_ids,
+            training_manifest_ids=training_manifest_ids,
+            compatible_families=compatible_families,
+            registry_path=registry_path,
+            adapter_role=adapter_role,
+            dev_gain=dev_gain,
+        )
         print(f"  Stage 2 (DPO): path={dpo_path}")
         return dpo_path
 
@@ -83,6 +113,13 @@ def train_generator_sft(
     high_episodes: list[dict],
     config,
     cycle: int = 0,
+    *,
+    source_skill_card_ids: list[str] | None = None,
+    training_manifest_ids: list[str] | None = None,
+    compatible_families: list[str] | None = None,
+    registry_path: str | None = None,
+    adapter_role: str = "global",
+    dev_gain: float = 0.0,
 ) -> tuple[str, float | None]:
     """Train DoRA adapter via SFT on high-Q episodes."""
     output_dir = str(Path(config.adapters_dir) / f"generator_sft_v{cycle}")
@@ -160,6 +197,23 @@ def train_generator_sft(
             "use_dora": config.use_dora,
         }, f, indent=2)
 
+    if registry_path:
+        register_adapter_artifact(
+            registry_path,
+            output_dir,
+            base_model=config.active_model_hf,
+            adapter_role=adapter_role,
+            training_manifest_ids=training_manifest_ids or [],
+            source_skill_card_ids=source_skill_card_ids or [],
+            compatible_families=compatible_families or [],
+            dev_gain=dev_gain,
+            metadata={
+                "trainer": "generator_sft",
+                "cycle": cycle,
+                "final_loss": final_loss,
+            },
+        )
+
     del model, trainer
     gc.collect()
     torch.cuda.empty_cache()
@@ -176,6 +230,13 @@ def train_generator_dpo(
     config,
     cycle: int = 0,
     sft_adapter_path: str | None = None,
+    *,
+    source_skill_card_ids: list[str] | None = None,
+    training_manifest_ids: list[str] | None = None,
+    compatible_families: list[str] | None = None,
+    registry_path: str | None = None,
+    adapter_role: str = "global",
+    dev_gain: float = 0.0,
 ) -> str:
     """DPO starting from SFT adapter. Learns what to avoid.
 
@@ -260,6 +321,24 @@ def train_generator_dpo(
             "final_loss": final_loss,
             "use_dora": config.use_dora,
         }, f, indent=2)
+
+    if registry_path:
+        register_adapter_artifact(
+            registry_path,
+            output_dir,
+            base_model=config.active_model_hf,
+            adapter_role=adapter_role,
+            training_manifest_ids=training_manifest_ids or [],
+            source_skill_card_ids=source_skill_card_ids or [],
+            compatible_families=compatible_families or [],
+            dev_gain=dev_gain,
+            metadata={
+                "trainer": "generator_dpo",
+                "cycle": cycle,
+                "sft_adapter_path": sft_adapter_path,
+                "final_loss": final_loss,
+            },
+        )
 
     del model, trainer
     if sft_adapter_path:

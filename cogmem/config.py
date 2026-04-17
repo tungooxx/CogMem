@@ -23,6 +23,7 @@ class CogMemConfig:
     alfworld_memory_bank: str = "results/alfworld/memory_bank.json"
     bigcodebench_memory_bank: str = "results/bigcodebench/memory_bank.json"
     adapters_dir: str = "results/adapters"
+    adapter_registry_path: str = "results/adapters/registry.json"
     experiments_dir: str = "results/experiments"
     logs_dir: str = "logs/"
     skills_dir: str = "results/skills"
@@ -77,6 +78,11 @@ class CogMemConfig:
     skill_validation_min_matches: int = 2
     skill_trigger_limit: int = 6
     skill_plan_limit: int = 5
+
+    # --- Routed adapter memory ---
+    adapter_route_min_dev_gain: float = 0.0
+    adapter_route_allow_global: bool = True
+    adapter_route_allow_family: bool = True
 
     # --- Generator DoRA: Stage 1 (SFT) ---
     generator_rank: int = 16

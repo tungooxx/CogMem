@@ -22,6 +22,8 @@ from transformers import (
     DataCollatorForSeq2Seq,
 )
 
+from cogmem.consolidation.adapter_registry import register_adapter_artifact
+
 
 def _load_jsonl(path: str) -> list[dict]:
     data = []
@@ -43,6 +45,13 @@ def train_lora_local(
     jsonl_path: str,
     config,
     policy_name: str = "q_top_k",
+    *,
+    source_skill_card_ids: list[str] | None = None,
+    training_manifest_ids: list[str] | None = None,
+    compatible_families: list[str] | None = None,
+    adapter_role: str = "family",
+    dev_gain: float = 0.0,
+    registry_path: str | None = None,
 ) -> dict:
     adapter_dir = f"{config.adapters_dir}/{policy_name}"
     Path(adapter_dir).mkdir(parents=True, exist_ok=True)
@@ -118,9 +127,28 @@ def train_lora_local(
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
 
+    registry_record = None
+    if registry_path:
+        registry_record = register_adapter_artifact(
+            registry_path,
+            adapter_dir,
+            base_model=model_name,
+            adapter_role=adapter_role,
+            training_manifest_ids=training_manifest_ids or [],
+            source_skill_card_ids=source_skill_card_ids or [],
+            compatible_families=compatible_families or [],
+            dev_gain=dev_gain,
+            metadata={
+                "trainer": "local",
+                "policy_name": policy_name,
+                "jsonl_path": jsonl_path,
+            },
+        )
+
     return {
         "status": "completed",
         "adapter_dir": adapter_dir,
+        "adapter_id": registry_record.adapter_id if registry_record else None,
         "model_id": f"local-{policy_name}",
         "job_id": "local",
         "trainable_params": sum(p.numel() for p in model.parameters() if p.requires_grad),
