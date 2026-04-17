@@ -66,6 +66,7 @@ def train_generator_full(
     registry_path: str | None = None,
     adapter_role: str = "global",
     dev_gain: float = 0.0,
+    sft_pairs: list[dict] | None = None,
 ) -> str:
     """Two-stage generator training: SFT then DPO.
 
@@ -81,6 +82,7 @@ def train_generator_full(
         registry_path=registry_path,
         adapter_role=adapter_role,
         dev_gain=dev_gain,
+        sft_pairs=sft_pairs,
     )
     print(f"  Stage 1 (SFT): loss={sft_loss}, path={sft_path}")
 
@@ -120,6 +122,7 @@ def train_generator_sft(
     registry_path: str | None = None,
     adapter_role: str = "global",
     dev_gain: float = 0.0,
+    sft_pairs: list[dict] | None = None,
 ) -> tuple[str, float | None]:
     """Train DoRA adapter via SFT on high-Q episodes."""
     output_dir = str(Path(config.adapters_dir) / f"generator_sft_v{cycle}")
@@ -148,8 +151,8 @@ def train_generator_sft(
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # Build SFT dataset from high-Q episodes
-    dataset = _prepare_sft_dataset(high_episodes, tokenizer, config)
+    # Build SFT dataset from promoted skill-card pairs, with episode fallback.
+    dataset = _prepare_sft_dataset(sft_pairs or high_episodes, tokenizer, config)
     print(f"  SFT dataset: {len(dataset)} examples")
 
     gc.collect()
@@ -192,6 +195,8 @@ def train_generator_sft(
             "cycle": cycle,
             "base_model": config.active_model_hf,
             "episodes": len(high_episodes),
+            "skill_sft_pairs": len(sft_pairs or []),
+            "training_source": "skill_cards" if sft_pairs else "episodes",
             "dataset_size": len(dataset),
             "final_loss": final_loss,
             "use_dora": config.use_dora,
@@ -354,9 +359,9 @@ def train_generator_dpo(
 # -------------------------------------------------------------------------
 
 def _prepare_sft_dataset(
-    episodes: list[dict], tokenizer, config,
+    examples: list[dict], tokenizer, config,
 ) -> Dataset:
-    """Convert high-Q episodes to tokenized SFT data.
+    """Convert high-Q episodes or prebuilt SFT pairs to tokenized data.
 
     CRITICAL: Uses the SAME prompt format as evaluation (format_messages)
     so the model learns to respond to the exact same prompts it sees at test time.
@@ -364,20 +369,32 @@ def _prepare_sft_dataset(
     from cogmem.benchmarks.bigcodebench.prompts import SYSTEM_PROMPT
 
     pairs = []
-    for ep in episodes:
-        code = ep.get("final_code") or ep.get("generated_code") or ep.get("script")
-        if not code:
+    for example in examples:
+        if "messages" in example:
+            pairs.append({"messages": example["messages"]})
             continue
 
-        instruction = ep.get("task_description", "")
+        if "instruction" in example and "response" in example:
+            instruction = example.get("instruction", "")
+            response = example.get("response", "")
+        else:
+            response = (
+                example.get("final_code")
+                or example.get("generated_code")
+                or example.get("script")
+            )
+            instruction = example.get("task_description", "")
+
+        if not instruction or not response:
+            continue
 
         pairs.append({
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": instruction},
-                    {"role": "assistant", "content": code},
-                ]
-            })
+                {"role": "assistant", "content": response},
+            ]
+        })
 
     def tokenize(example):
         text = tokenizer.apply_chat_template(

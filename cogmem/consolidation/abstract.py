@@ -1,4 +1,4 @@
-"""Convert episodes to training data: SFT pairs and DPO preference pairs.
+"""Convert episodes or validated skill cards to training data.
 
 Two dataset types:
 1. SFT dataset: high-Q episodes -> (instruction, response) pairs
@@ -12,18 +12,114 @@ from cogmem.consolidation.select import filter_manifest_eligible
 from cogmem.memory.schema import get_episode_helpfulness
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 def episode_to_training_pair(episode: dict, include_failures: bool = False) -> dict | None:
-    if not episode.get("script"):
+    response = episode.get("final_code") or episode.get("generated_code") or episode.get("script")
+    if not response:
         return None
     if not include_failures and not episode.get("success"):
         return None
     return {
         "instruction": episode["task_description"],
-        "response": episode["script"],
+        "response": response,
         "weight": max(get_episode_helpfulness(episode, 0.0), 0.01),
         "success": episode.get("success", False),
         "source_episode": episode["episode_id"],
     }
+
+
+def _skill_card_manifest_eligible(card: dict, config) -> bool:
+    allowed = set(getattr(config, "allowed_manifest_ids", []) or [])
+    blocked = set(getattr(config, "blocked_manifest_ids", []) or [])
+    require_manifest_match = bool(getattr(config, "require_manifest_match", False))
+    manifest_ids = {
+        str(manifest_id)
+        for manifest_id in (card.get("manifest_ids", []) or [])
+        if manifest_id
+    }
+
+    if blocked and manifest_ids & blocked:
+        return False
+    if allowed and not (manifest_ids & allowed):
+        return False
+    if require_manifest_match and not manifest_ids:
+        return False
+    return True
+
+
+def skill_card_to_training_pairs(
+    card: dict,
+    episodes_by_id: dict[str, dict],
+    *,
+    include_failures: bool = False,
+) -> list[dict]:
+    """Build weighted SFT pairs from one promoted skill card and its evidence."""
+    confidence = _clamp01(card.get("confidence", 0.0))
+    transfer_gain = _clamp01(card.get("transfer_gain", 0.0))
+    evidence_ids = card.get("evidence_episode_ids", []) or []
+
+    pairs: list[dict] = []
+    for episode_id in evidence_ids:
+        episode = episodes_by_id.get(episode_id)
+        if episode is None:
+            continue
+        pair = episode_to_training_pair(episode, include_failures=include_failures)
+        if pair is None:
+            continue
+        base_weight = float(pair["weight"])
+        pair["weight"] = max(
+            0.01,
+            min(
+                1.0,
+                0.50 * base_weight + 0.30 * confidence + 0.20 * transfer_gain,
+            ),
+        )
+        pair["source_skill_card"] = card["skill_id"]
+        pair["skill_confidence"] = confidence
+        pair["skill_transfer_gain"] = float(card.get("transfer_gain", 0.0) or 0.0)
+        pairs.append(pair)
+    return pairs
+
+
+def prepare_skill_training_dataset(
+    skill_cards: list[dict],
+    episodes: list[dict],
+    replay_buffer: list[dict] | None = None,
+    include_failures: bool = False,
+    config=None,
+) -> list[dict]:
+    """Build SFT pairs from promoted skill cards, backed by evidence episodes."""
+    eligible_episodes = filter_manifest_eligible(episodes, config) if config is not None else list(episodes)
+    episodes_by_id = {ep["episode_id"]: ep for ep in eligible_episodes if ep.get("episode_id")}
+
+    pairs: list[dict] = []
+    for card in skill_cards:
+        if config is not None and not _skill_card_manifest_eligible(card, config):
+            continue
+        pairs.extend(
+            skill_card_to_training_pairs(
+                card,
+                episodes_by_id,
+                include_failures=include_failures,
+            )
+        )
+
+    if replay_buffer:
+        for example in replay_buffer:
+            if config is not None and not filter_manifest_eligible([example], config):
+                continue
+            pairs.append({
+                "instruction": example["instruction"],
+                "response": example["response"],
+                "weight": 1.0,
+                "source_episode": "replay",
+                "source_skill_card": "replay",
+            })
+
+    return pairs
 
 
 def q_weighted_duplicates(pairs: list[dict]) -> list[dict]:

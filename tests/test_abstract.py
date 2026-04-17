@@ -2,9 +2,11 @@ import json
 import pytest
 from cogmem.consolidation.abstract import (
     episode_to_training_pair,
+    prepare_skill_training_dataset,
     prepare_training_dataset,
     q_weighted_duplicates,
     save_as_jsonl,
+    skill_card_to_training_pairs,
 )
 
 
@@ -22,6 +24,13 @@ class TestEpisodeToTrainingPair:
         ep["episode_helpfulness"] = 0.61
         pair = episode_to_training_pair(ep)
         assert pair["weight"] == 0.61
+
+    def test_uses_final_code_when_script_missing(self, sample_episodes):
+        ep = dict(sample_episodes[0])
+        ep["script"] = ""
+        ep["final_code"] = "def solve():\n    return 1\n"
+        pair = episode_to_training_pair(ep)
+        assert pair["response"] == ep["final_code"]
 
     def test_skips_failed_episodes(self, sample_episodes):
         ep = sample_episodes[7]  # failed
@@ -81,6 +90,101 @@ class TestPrepareTrainingDataset:
         )
 
         assert all(pair["source_episode"] in {episodes[0]["episode_id"], episodes[1]["episode_id"]} for pair in dataset)
+
+
+class TestPrepareSkillTrainingDataset:
+    def test_builds_pairs_from_skill_card_evidence(self):
+        episodes = [
+            {
+                "episode_id": "ep_a",
+                "task_description": "sort a list safely",
+                "task_type": "sorting",
+                "script": "def solve(xs):\n    return sorted(xs)\n",
+                "success": True,
+                "q_value": 0.8,
+                "episode_helpfulness": 0.8,
+                "manifest_id": "manifest_a",
+            },
+            {
+                "episode_id": "ep_b",
+                "task_description": "sort numbers without mutation",
+                "task_type": "sorting",
+                "script": "def solve(xs):\n    return sorted(xs)\n",
+                "success": True,
+                "q_value": 0.7,
+                "episode_helpfulness": 0.7,
+                "manifest_id": "manifest_a",
+            },
+        ]
+        card = {
+            "skill_id": "skill_sorting",
+            "manifest_ids": ["manifest_a"],
+            "evidence_episode_ids": ["ep_a", "ep_b"],
+            "confidence": 0.9,
+            "transfer_gain": 0.6,
+        }
+
+        pairs = prepare_skill_training_dataset([card], episodes)
+
+        assert [pair["source_episode"] for pair in pairs] == ["ep_a", "ep_b"]
+        assert all(pair["source_skill_card"] == "skill_sorting" for pair in pairs)
+        assert all(0.01 <= pair["weight"] <= 1.0 for pair in pairs)
+
+    def test_filters_skill_cards_by_manifest(self):
+        from cogmem.config import CogMemConfig
+
+        episodes = [
+            {
+                "episode_id": "ep_a",
+                "task_description": "parse json",
+                "task_type": "parsing",
+                "script": "import json\njson.loads(data)\n",
+                "success": True,
+                "q_value": 0.9,
+                "episode_helpfulness": 0.9,
+                "manifest_id": "manifest_a",
+            },
+        ]
+        card = {
+            "skill_id": "skill_parse",
+            "manifest_ids": ["manifest_b"],
+            "evidence_episode_ids": ["ep_a"],
+            "confidence": 0.8,
+            "transfer_gain": 0.5,
+        }
+
+        pairs = prepare_skill_training_dataset(
+            [card],
+            episodes,
+            config=CogMemConfig(allowed_manifest_ids=["manifest_a"]),
+        )
+
+        assert pairs == []
+
+
+class TestSkillCardToTrainingPairs:
+    def test_merges_episode_and_card_signal_into_weight(self):
+        episode = {
+            "episode_id": "ep_1",
+            "task_description": "read csv from disk",
+            "task_type": "file_io",
+            "script": "import pandas as pd\npd.read_csv(path)\n",
+            "success": True,
+            "q_value": 0.6,
+            "episode_helpfulness": 0.6,
+        }
+        card = {
+            "skill_id": "skill_csv",
+            "evidence_episode_ids": ["ep_1"],
+            "confidence": 0.9,
+            "transfer_gain": 0.7,
+        }
+
+        pairs = skill_card_to_training_pairs(card, {"ep_1": episode})
+
+        assert len(pairs) == 1
+        assert pairs[0]["weight"] > 0.6
+        assert pairs[0]["skill_confidence"] == 0.9
 
 
 class TestSaveAsJsonl:

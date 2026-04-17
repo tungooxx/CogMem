@@ -20,6 +20,7 @@ from datasets import Dataset
 from cogmem.config import CogMemConfig
 from cogmem.consolidation.abstract import (
     prepare_preference_dataset,
+    prepare_skill_training_dataset,
     prepare_training_dataset,
     save_as_jsonl,
 )
@@ -128,12 +129,29 @@ def run_qstar_cycle(
     if pref_pairs:
         pref_dataset = Dataset.from_list(pref_pairs)
 
+    skill_training_pairs = prepare_skill_training_dataset(
+        promoted_cards,
+        available_episodes,
+        config=config,
+    )
+    training_source = "skill_cards" if skill_training_pairs else "episodes"
+    training_manifest_ids = (
+        promoted_manifest_ids
+        if skill_training_pairs else
+        sorted({ep.get("manifest_id") for ep in selected if ep.get("manifest_id")})
+    )
+    training_families = (
+        promoted_families
+        if skill_training_pairs else
+        sorted({ep.get("task_type") for ep in selected if ep.get("task_type")})
+    )
+
     # 3. Train generator (SFT then DPO)
     print(f"\n{'=' * 60}")
     print("STEP 3: Train Generator DoRA (SFT -> DPO)")
     print("=" * 60)
 
-    if not selected:
+    if not selected and not skill_training_pairs:
         print("  No high-Q episodes available. Skipping training.")
         return {
             "cycle": cycle,
@@ -147,6 +165,8 @@ def run_qstar_cycle(
             "skill_cards_path": skill_cards_path,
             "skill_cards_total": skill_summary["total"],
             "skill_cards_promoted": skill_summary["promoted"],
+            "training_source": training_source,
+            "training_examples": 0,
             "verification": {},
             "status": "skipped_no_data",
         }
@@ -154,10 +174,11 @@ def run_qstar_cycle(
     generator_path = train_generator_full(
         selected, pref_dataset, config, cycle=cycle,
         source_skill_card_ids=promoted_skill_ids,
-        training_manifest_ids=promoted_manifest_ids,
-        compatible_families=promoted_families,
+        training_manifest_ids=training_manifest_ids,
+        compatible_families=training_families,
         registry_path=config.adapter_registry_path,
         adapter_role="global",
+        sft_pairs=skill_training_pairs or None,
     )
 
     # 4. Train verifier (DPO)
@@ -215,6 +236,8 @@ def run_qstar_cycle(
         "skill_cards_path": skill_cards_path,
         "skill_cards_total": skill_summary["total"],
         "skill_cards_promoted": skill_summary["promoted"],
+        "training_source": training_source,
+        "training_examples": len(skill_training_pairs) if skill_training_pairs else len(selected),
         "adapter_registry_path": config.adapter_registry_path,
         "verification": verification,
     }
@@ -229,6 +252,7 @@ def run_qstar_cycle(
     print(f"  Generator: {generator_path}")
     print(f"  Verifier:  {verifier_path}")
     print(f"  Skill cards: {skill_summary['promoted']}/{skill_summary['total']} promoted")
+    print(f"  Training source: {training_source} ({results['training_examples']} examples)")
     if verification:
         print(f"  Pass rate: {verification['mean']:.1%}")
     print("=" * 60)
