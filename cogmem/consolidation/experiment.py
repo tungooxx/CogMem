@@ -179,6 +179,7 @@ def prepare_new_arch_task_split(
 def load_new_arch_runtime(
     *,
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    adapter_path: str | None = None,
 ):
     import torch
 
@@ -205,10 +206,176 @@ def load_new_arch_runtime(
             torch_dtype=dtype,
             device_map="auto",
         )
+    if adapter_path:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter_path)
+    model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer, TransformersChatClient(model, tokenizer)
+
+
+def _release_new_arch_runtime(model=None, tokenizer=None, llm_client=None) -> None:
+    del llm_client
+    del tokenizer
+    del model
+
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def evaluate_new_arch_model(
+    eval_tasks: list[dict],
+    *,
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    adapter_path: str | None = None,
+    task_limit: int | None = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 1,
+    eval_timeout: int = 30,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    tasks = list(eval_tasks[:task_limit]) if task_limit else list(eval_tasks)
+    model = tokenizer = llm_client = None
+    rows: list[dict[str, Any]] = []
+    passed = 0
+    start_time = time.time()
+
+    try:
+        model, tokenizer, llm_client = load_new_arch_runtime(
+            model_name=model_name,
+            adapter_path=adapter_path,
+        )
+
+        for idx, task in enumerate(tasks):
+            episode = run_single_task(
+                task,
+                llm_client,
+                eval_mode="subprocess",
+                eval_timeout=eval_timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                max_attempts=max_attempts,
+            )
+            success = bool(episode.get("success"))
+            if success:
+                passed += 1
+
+            rows.append(
+                {
+                    "task_id": task["task_id"],
+                    "passed": success,
+                    "attempts": int(episode.get("num_attempts", 0) or 0),
+                    "error": episode.get("error"),
+                }
+            )
+
+            if verbose and ((idx + 1) % 10 == 0 or idx < 5):
+                elapsed = time.time() - start_time
+                rate = (idx + 1) / elapsed * 3600 if elapsed > 0 else 0.0
+                label = "adapter" if adapter_path else "base"
+                print(
+                    "[{}/{}] {} | {}={} | pass_rate={:.1%} | {:.0f}/hr".format(
+                        idx + 1,
+                        len(tasks),
+                        task["task_id"],
+                        label,
+                        int(success),
+                        passed / max(idx + 1, 1),
+                        rate,
+                    )
+                )
+    finally:
+        _release_new_arch_runtime(model, tokenizer, llm_client)
+
+    task_count = len(tasks)
+    return {
+        "adapter_path": adapter_path,
+        "task_count": task_count,
+        "passed": passed,
+        "pass_rate": passed / task_count if task_count else 0.0,
+        "elapsed_minutes": (time.time() - start_time) / 60.0,
+        "rows": rows,
+    }
+
+
+def compare_new_arch_base_vs_adapter(
+    eval_tasks: list[dict],
+    *,
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    adapter_path: str,
+    task_limit: int | None = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 1,
+    eval_timeout: int = 30,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    if not adapter_path:
+        raise ValueError("adapter_path is required for base-vs-adapter comparison")
+
+    base_eval = evaluate_new_arch_model(
+        eval_tasks,
+        model_name=model_name,
+        adapter_path=None,
+        task_limit=task_limit,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        max_attempts=max_attempts,
+        eval_timeout=eval_timeout,
+        verbose=verbose,
+    )
+    adapter_eval = evaluate_new_arch_model(
+        eval_tasks,
+        model_name=model_name,
+        adapter_path=adapter_path,
+        task_limit=task_limit,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        max_attempts=max_attempts,
+        eval_timeout=eval_timeout,
+        verbose=verbose,
+    )
+
+    base_rows = {row["task_id"]: row for row in base_eval["rows"]}
+    adapter_rows = {row["task_id"]: row for row in adapter_eval["rows"]}
+    shared_task_ids = [task["task_id"] for task in (eval_tasks[:task_limit] if task_limit else eval_tasks)]
+
+    improved = [
+        task_id
+        for task_id in shared_task_ids
+        if adapter_rows.get(task_id, {}).get("passed") and not base_rows.get(task_id, {}).get("passed")
+    ]
+    regressed = [
+        task_id
+        for task_id in shared_task_ids
+        if base_rows.get(task_id, {}).get("passed") and not adapter_rows.get(task_id, {}).get("passed")
+    ]
+
+    return {
+        "task_count": base_eval["task_count"],
+        "base": base_eval,
+        "adapter": adapter_eval,
+        "delta_passed": adapter_eval["passed"] - base_eval["passed"],
+        "delta_pass_rate": adapter_eval["pass_rate"] - base_eval["pass_rate"],
+        "improved_task_ids": improved,
+        "regressed_task_ids": regressed,
+    }
 
 
 def _collection_signature(tasks: list[dict]) -> dict[str, Any]:
@@ -443,6 +610,8 @@ __all__ = [
     "load_new_arch_tasks",
     "prepare_new_arch_task_split",
     "load_new_arch_runtime",
+    "evaluate_new_arch_model",
+    "compare_new_arch_base_vs_adapter",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",
     "run_new_arch_qstar_cycle",
