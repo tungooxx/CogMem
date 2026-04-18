@@ -22,6 +22,40 @@ from transformers import (
 )
 
 
+def _make_bnb_config(bits: int) -> BitsAndBytesConfig:
+    if bits == 4:
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+    return BitsAndBytesConfig(load_in_8bit=True)
+
+
+def _load_model_for_training(model_name: str, *, bits: int):
+    model_kwargs = {
+        "device_map": {"": 0},
+        "torch_dtype": torch.float16,
+        "attn_implementation": "eager",
+    }
+    if bits > 0:
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=_make_bnb_config(bits),
+                **model_kwargs,
+            )
+            return model, True
+        except Exception as exc:
+            print(
+                f"  Quantized verifier load failed ({type(exc).__name__}: {exc}); "
+                "retrying with plain fp16 weights."
+            )
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    return model, False
+
+
 def _uses_kbit_weights(model) -> bool:
     candidates = [
         model,
@@ -65,28 +99,13 @@ def train_verifier(
     precision_kwargs = _precision_kwargs()
 
     bits = config.quantization_bits
-    if bits == 4:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-    else:
-        bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        config.active_model_hf,
-        quantization_config=bnb_config,
-        device_map={"": 0},
-        torch_dtype=torch.float16,
-        attn_implementation="eager",
-    )
+    model, use_kbit = _load_model_for_training(config.active_model_hf, bits=bits)
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = prepare_model_for_kbit_training(model)
+    if use_kbit:
+        model = prepare_model_for_kbit_training(model)
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -118,6 +137,7 @@ def train_verifier(
         logging_steps=10,
         save_strategy="epoch",
         **precision_kwargs,
+        optim="paged_adamw_8bit" if use_kbit else "adamw_torch",
         seed=config.seed,
         report_to="none",
         max_length=2048,

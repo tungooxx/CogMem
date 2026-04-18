@@ -42,6 +42,29 @@ def _make_bnb_config(bits: int) -> BitsAndBytesConfig:
     return BitsAndBytesConfig(load_in_8bit=True)
 
 
+def _load_model_for_training(model_name: str, *, bits: int):
+    model_kwargs = {
+        "device_map": {"": 0},
+        "torch_dtype": torch.float16,
+        "attn_implementation": "eager",
+    }
+    if bits > 0:
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=_make_bnb_config(bits),
+                **model_kwargs,
+            )
+            return model, True
+        except Exception as exc:
+            print(
+                f"  Quantized training load failed ({type(exc).__name__}: {exc}); "
+                "retrying with plain fp16 weights."
+            )
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    return model, False
+
+
 def _uses_kbit_weights(model) -> bool:
     candidates = [
         model,
@@ -156,21 +179,18 @@ def train_generator_sft(
     output_dir = str(Path(config.adapters_dir) / f"generator_sft_v{cycle}")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    bnb_config = _make_bnb_config(config.quantization_bits)
     precision_kwargs = _precision_kwargs()
 
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model, use_kbit = _load_model_for_training(
         config.active_model_hf,
-        quantization_config=bnb_config,
-        device_map={"": 0},
-        torch_dtype=torch.float16,
-        attn_implementation="eager",
+        bits=config.quantization_bits,
     )
-    model = prepare_model_for_kbit_training(model)
+    if use_kbit:
+        model = prepare_model_for_kbit_training(model)
 
     lora_config = _make_lora_config(config, use_dora=config.use_dora)
 
@@ -201,7 +221,7 @@ def train_generator_sft(
             save_steps=200,
             save_total_limit=2,
             **precision_kwargs,
-            optim="paged_adamw_8bit",
+            optim="paged_adamw_8bit" if use_kbit else "adamw_torch",
             report_to="none",
             seed=config.seed,
             gradient_checkpointing=True,
@@ -284,15 +304,11 @@ def train_generator_dpo(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     precision_kwargs = _precision_kwargs()
-    bnb_config = _make_bnb_config(config.quantization_bits)
 
     # Load base model
-    base_model = AutoModelForCausalLM.from_pretrained(
+    base_model, use_kbit = _load_model_for_training(
         config.active_model_hf,
-        quantization_config=bnb_config,
-        device_map={"": 0},
-        torch_dtype=torch.float16,
-        attn_implementation="eager",
+        bits=config.quantization_bits,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
@@ -306,7 +322,8 @@ def train_generator_dpo(
     else:
         model = base_model
 
-    model = prepare_model_for_kbit_training(model)
+    if use_kbit:
+        model = prepare_model_for_kbit_training(model)
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -330,6 +347,7 @@ def train_generator_dpo(
         logging_steps=10,
         save_strategy="epoch",
         **precision_kwargs,
+        optim="paged_adamw_8bit" if use_kbit else "adamw_torch",
         seed=config.seed,
         report_to="none",
         max_length=2048,
