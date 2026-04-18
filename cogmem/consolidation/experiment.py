@@ -424,10 +424,17 @@ def run_new_arch_qstar_cycle(
     cogmem_config: CogMemConfig,
     *,
     cycle: int = 0,
+    skill_cards_path: str | None = None,
 ) -> dict[str, Any]:
     from cogmem.consolidation.pipeline import run_qstar_cycle
 
-    return run_qstar_cycle(memory_bank_path, cogmem_config, cycle=cycle, run_task_fn=None)
+    return run_qstar_cycle(
+        memory_bank_path,
+        cogmem_config,
+        cycle=cycle,
+        run_task_fn=None,
+        existing_skill_cards_path=skill_cards_path,
+    )
 
 
 __all__ = [

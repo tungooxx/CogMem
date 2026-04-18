@@ -29,6 +29,7 @@ from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
 from cogmem.memory.memory_bank import MemoryBank
 from cogmem.memory.schema import get_episode_helpfulness
+from cogmem.memory.skill_store import SkillStore
 from cogmem.utils.logging import save_results
 
 
@@ -41,6 +42,7 @@ def run_qstar_cycle(
     config: CogMemConfig,
     cycle: int = 0,
     run_task_fn=None,
+    existing_skill_cards_path: str | None = None,
 ) -> dict:
     """Run one Q-STaR consolidation cycle.
 
@@ -56,6 +58,7 @@ def run_qstar_cycle(
         config: CogMemConfig.
         cycle: Current cycle number (0-indexed).
         run_task_fn: Optional callable for evaluation.
+        existing_skill_cards_path: Optional prevalidated skill-card store to reuse.
 
     Returns:
         Dict with adapter paths, training stats, evaluation results.
@@ -92,13 +95,18 @@ def run_qstar_cycle(
     print(f"  Successes: {len(successes)}")
     print(f"  High-Q selected: {len(selected)} (Q >= {config.q_threshold})")
 
-    skill_cards_path = str(Path(config.skills_dir) / f"skill_cards_cycle_{cycle}.json")
-    skill_store = build_skill_cards(
-        available_episodes,
-        holdout_episodes,
-        config=config,
-        output_path=skill_cards_path,
-    )
+    default_skill_cards_path = str(Path(config.skills_dir) / f"skill_cards_cycle_{cycle}.json")
+    skill_cards_path = existing_skill_cards_path or default_skill_cards_path
+    if existing_skill_cards_path and Path(existing_skill_cards_path).exists():
+        skill_store = SkillStore.load(existing_skill_cards_path)
+        print(f"  Skill cards: loaded existing store from {existing_skill_cards_path}")
+    else:
+        skill_store = build_skill_cards(
+            available_episodes,
+            holdout_episodes,
+            config=config,
+            output_path=skill_cards_path,
+        )
     skill_summary = skill_store.summary()
     promoted_cards = list(skill_store.filter(promoted=True))
     promoted_skill_ids = [card["skill_id"] for card in promoted_cards]
