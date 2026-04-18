@@ -8,6 +8,7 @@ This is the standard recipe (DeepSeek, Llama): SFT first, then DPO.
 """
 
 import gc
+import inspect
 import json
 from pathlib import Path
 
@@ -93,16 +94,28 @@ class _KbitSafeTrainer(Trainer):
         return super()._move_model_to_device(model, device)
 
 
+def _resolve_use_dora(requested: bool) -> bool:
+    if not requested:
+        return False
+    if "use_dora" in inspect.signature(LoraConfig.__init__).parameters:
+        return True
+    print("  PEFT does not support DoRA in this environment; falling back to plain LoRA.")
+    return False
+
+
 def _make_lora_config(config, use_dora: bool = True) -> LoraConfig:
-    return LoraConfig(
+    resolved_use_dora = _resolve_use_dora(use_dora)
+    kwargs = dict(
         r=config.generator_rank,
         lora_alpha=config.generator_alpha,
         lora_dropout=config.generator_dropout,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         bias="none",
         task_type="CAUSAL_LM",
-        use_dora=use_dora,
     )
+    if resolved_use_dora:
+        kwargs["use_dora"] = True
+    return LoraConfig(**kwargs)
 
 
 def train_generator_full(

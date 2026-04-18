@@ -9,6 +9,7 @@ model sitting outside the LLM — it's a DoRA adapter ON the same base model.
 """
 
 import gc
+import inspect
 import json
 from pathlib import Path
 
@@ -77,6 +78,15 @@ def _precision_kwargs() -> dict[str, bool]:
     return {"bf16": False, "fp16": True}
 
 
+def _resolve_use_dora(requested: bool) -> bool:
+    if not requested:
+        return False
+    if "use_dora" in inspect.signature(LoraConfig.__init__).parameters:
+        return True
+    print("  PEFT does not support DoRA in this environment; falling back to plain LoRA.")
+    return False
+
+
 def train_verifier(
     preference_dataset: Dataset,
     config,
@@ -110,15 +120,18 @@ def train_verifier(
     gc.collect()
     torch.cuda.empty_cache()
 
-    lora_config = LoraConfig(
+    resolved_use_dora = _resolve_use_dora(config.use_dora)
+    lora_kwargs = dict(
         r=config.verifier_rank,
         lora_alpha=config.verifier_alpha,
         lora_dropout=config.verifier_dropout,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         bias="none",
         task_type="CAUSAL_LM",
-        use_dora=config.use_dora,
     )
+    if resolved_use_dora:
+        lora_kwargs["use_dora"] = True
+    lora_config = LoraConfig(**lora_kwargs)
 
     class _KbitSafeDPOTrainer(DPOTrainer):
         def _move_model_to_device(self, model, device):
