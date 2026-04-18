@@ -420,7 +420,8 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
         if match_helpfulness and baseline_helpfulness
         else 0.0
     )
-    support_factor = min(1.0, len(matches) / max(min_matches, 1))
+    matched_task_count = len(matched_task_ids)
+    support_factor = min(1.0, matched_task_count / max(min_matches, 1))
     evidence_task_count = int(card.get("distinct_task_count") or len(card.get("evidence_task_ids", []) or []))
     confidence = _clamp01(
         0.35 * support_factor
@@ -430,7 +431,7 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
         - 0.25 * negative_transfer_rate
     )
     status = "promoted" if (
-        len(matches) >= min_matches
+        matched_task_count >= min_matches
         and evidence_task_count >= min_distinct_tasks
         and transfer_gain >= min_transfer_gain
         and confidence >= min_confidence
@@ -455,11 +456,28 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
     return normalize_skill_card(updated, copy_card=True)
 
 
+def _stop_condition_risk(card: dict, record_tokens: set[str], error_family: str) -> float:
+    stop_text = " ".join(card.get("stop_conditions", []) or []).lower()
+    if not stop_text:
+        return 0.0
+    risk = 0.0
+    stop_tokens = {
+        token
+        for token in re.findall(r"[a-zA-Z_]{4,}", stop_text)
+        if token not in TRIGGER_STOPWORDS
+    }
+    if error_family and error_family.lower() in stop_text:
+        risk += 1.0
+    risk += 0.15 * len(record_tokens & stop_tokens)
+    return min(risk, 1.5)
+
+
 def _skill_match_score(card: dict, record: dict) -> float:
     record_group = _group_key(record)
     record_domain = _episode_domain(record)
     record_feature = _feature_bucket(record, record_domain)
     record_tokens = _episode_hint_tokens(record)
+    error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
     score = 0.0
 
     if card.get("task_type") == record_group:
@@ -479,10 +497,21 @@ def _skill_match_score(card: dict, record: dict) -> float:
         score += 0.25 * sum(1 for token in record_tokens if token in activation_text)
 
     if card.get("error_family"):
-        error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
         if error_family and error_family == card.get("error_family"):
             score += 1.5
 
+    score += 1.5 * max(float(card.get("transfer_gain", 0.0) or 0.0), 0.0)
+    score += 0.75 * float(card.get("confidence", 0.0) or 0.0)
+    score -= 1.75 * float(card.get("negative_transfer_rate", 0.0) or 0.0)
+
+    runtime_stats = dict(card.get("runtime_stats", {}) or {})
+    retrieved = int(runtime_stats.get("retrieved", 0) or 0)
+    if retrieved > 0:
+        helped = int(runtime_stats.get("helped", 0) or 0)
+        hurt = int(runtime_stats.get("hurt", 0) or 0)
+        score += 2.0 * ((helped - hurt) / max(retrieved, 1))
+
+    score -= _stop_condition_risk(card, record_tokens, error_family)
     return score
 
 

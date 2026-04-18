@@ -1,6 +1,12 @@
 from types import SimpleNamespace
 
-from cogmem.consolidation.experiment import compare_new_arch_base_vs_adapter, compare_new_arch_routes
+from cogmem.consolidation.experiment import (
+    _run_task_with_skill_cards,
+    compare_new_arch_base_vs_adapter,
+    compare_new_arch_routes,
+    run_new_arch_qstar_cycle,
+)
+from cogmem.config import CogMemConfig
 
 
 def test_compare_new_arch_base_vs_adapter_reports_improvements(monkeypatch):
@@ -122,3 +128,117 @@ def test_compare_new_arch_routes_includes_skill_retrieval(monkeypatch):
     assert result["adapter"]["passed"] == 0
     assert result["adapter_plus_skill"]["passed"] == 2
     assert result["base_plus_skill"]["selected_skill_ids"] == {"skill_plot": 2}
+    assert result["comparisons"]["base_plus_skill_vs_base"]["delta_passed"] == 0
+    assert result["comparisons"]["adapter_plus_skill_vs_adapter"]["delta_passed"] == 2
+    assert result["comparisons"]["base_plus_skill_vs_base"]["skill_utility"]["skill_plot"]["retrieved"] == 2
+
+
+def test_run_new_arch_qstar_cycle_skips_when_base_plus_skill_route_loses(tmp_path, monkeypatch):
+    bank_path = tmp_path / "memory_bank.json"
+    bank_path.write_text("[]", encoding="utf-8")
+    skills_path = tmp_path / "skills.json"
+    skills_path.write_text(
+        '[{"skill_id":"skill_plot","task_type":"matplotlib:plot","domain":"matplotlib","status":"promoted"}]',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.MemoryBank.load",
+        lambda path: [],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.filter_manifest_eligible",
+        lambda episodes, config: [],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.prepare_skill_training_dataset",
+        lambda *args, **kwargs: [{"instruction": "x", "output": "y"}],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.prepare_preference_dataset",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.compare_new_arch_routes",
+        lambda *args, **kwargs: {
+            "comparisons": {
+                "base_plus_skill_vs_base": {
+                    "delta_passed": 0,
+                    "regression_rate": 0.2,
+                    "regressed_task_ids": ["task_1"],
+                    "skill_utility": {},
+                }
+            }
+        },
+    )
+
+    result = run_new_arch_qstar_cycle(
+        str(bank_path),
+        CogMemConfig(
+            memory_bank_path=str(bank_path),
+            active_model_hf="Qwen/Qwen2.5-3B-Instruct",
+            skill_route_gate_min_delta_passed=1,
+            skill_route_gate_max_regression_rate=0.10,
+        ),
+        cycle=0,
+        skill_cards_path=str(skills_path),
+        eval_tasks=[{"task_id": "task_1", "instruct_prompt": "plot data", "libs": ["matplotlib"]}],
+    )
+
+    assert result["status"] == "skipped_route_gate"
+    assert result["route_gate"]["regressed_task_ids"] == ["task_1"]
+
+
+def test_run_task_with_skill_cards_reranks_after_failure(monkeypatch):
+    class DummyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, **kwargs):
+            self.calls += 1
+            return "```python\nprint('ok')\n```"
+
+    task = {"task_id": "task_plot", "instruct_prompt": "plot data", "libs": ["matplotlib"]}
+    attempts = iter(
+        [
+            {"passed": False, "error": "AssertionError: chart mismatch"},
+            {"passed": True, "error": None},
+        ]
+    )
+
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.format_messages",
+        lambda task, use_instruct=True: [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": task["instruct_prompt"]},
+        ],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.extract_code",
+        lambda response, task: "print('ok')",
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.evaluate_solution",
+        lambda task, code, **kwargs: next(attempts),
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.rank_skill_cards_for_record",
+        lambda store, record, **kwargs: (
+            [{"skill_id": "skill_fix_assertion", "status": "promoted"}]
+            if "AssertionError" in str(record.get("error") or "")
+            else [{"skill_id": "skill_plot", "status": "promoted"}]
+        ),
+    )
+
+    result = _run_task_with_skill_cards(
+        task,
+        DummyClient(),
+        retrieved_skill_cards=[{"skill_id": "skill_plot", "status": "promoted"}],
+        skill_store=object(),
+        skill_top_k=1,
+        max_attempts=2,
+    )
+
+    assert result["success"] is True
+    assert result["retrieved_skill_history"] == [["skill_plot"], ["skill_fix_assertion"]]
+    assert result["retrieved_skill_ids"] == ["skill_plot", "skill_fix_assertion"]

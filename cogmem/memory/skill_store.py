@@ -40,6 +40,14 @@ def _skill_id(card: dict) -> str:
     return f"skill_{hashlib.sha256(seed).hexdigest()[:16]}"
 
 
+def skill_family_key(card: dict) -> str:
+    task_type = str(card.get("task_type", "general") or "general")
+    domain = str(card.get("domain", "general") or "general")
+    if task_type and task_type != "general":
+        return task_type
+    return domain
+
+
 def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target = deepcopy(card) if copy_card else card
     target["skill_id"] = _skill_id(target)
@@ -57,6 +65,7 @@ def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target["error_family"] = target.get("error_family")
     target["source_episode_count"] = int(target.get("source_episode_count") or len(target["evidence_episode_ids"]))
     target["distinct_task_count"] = int(target.get("distinct_task_count") or len(target["evidence_task_ids"]))
+    target["family_key"] = str(target.get("family_key") or skill_family_key(target))
     transfer_gain = float(target.get("transfer_gain", target.get(CARD_TRANSFER_GAIN_KEY, 0.0)) or 0.0)
     confidence = _clamp01(target.get("confidence", target.get(RETRIEVAL_CONFIDENCE_KEY, 0.0)) or 0.0)
     negative_transfer_rate = _clamp01(
@@ -181,7 +190,13 @@ class SkillStore:
 
     def summary(self) -> dict:
         if not self._cards:
-            return {"total": 0, "promoted": 0, "mean_confidence": 0.0, "mean_transfer_gain": 0.0}
+            return {
+                "total": 0,
+                "promoted": 0,
+                "mean_confidence": 0.0,
+                "mean_transfer_gain": 0.0,
+                "promoted_families": 0,
+            }
         promoted = self.filter(promoted=True)
         return {
             "total": len(self._cards),
@@ -190,9 +205,9 @@ class SkillStore:
             "mean_transfer_gain": sum(card["transfer_gain"] for card in self._cards) / len(self._cards),
             "promoted_families": len(
                 {
-                    card.get("task_type") or card.get("domain")
+                    skill_family_key(card)
                     for card in promoted
-                    if card.get("task_type") or card.get("domain")
+                    if skill_family_key(card)
                 }
             ),
         }

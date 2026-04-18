@@ -36,8 +36,14 @@ from cogmem.consolidation.abstract import (
     prepare_preference_dataset,
     prepare_skill_training_dataset,
 )
-from cogmem.consolidation.proceduralize import build_skill_cards, rank_skill_cards_for_task
+from cogmem.consolidation.proceduralize import (
+    build_skill_cards,
+    rank_skill_cards_for_record,
+    rank_skill_cards_for_task,
+    task_to_skill_record,
+)
 from cogmem.consolidation.select import filter_manifest_eligible
+from cogmem.memory.episodic_store import infer_error_family
 from cogmem.memory.memory_bank import MemoryBank
 from cogmem.memory.skill_store import SkillStore, render_skill_card_context
 
@@ -254,11 +260,40 @@ def _augment_messages_with_skill_cards(messages: list[dict], skill_cards: list[d
     return augmented
 
 
+def _rerank_retry_skill_cards(
+    task: dict,
+    skill_store: SkillStore,
+    *,
+    previous_skill_ids: list[str],
+    error_text: str,
+    skill_top_k: int,
+) -> list[dict]:
+    retry_record = task_to_skill_record(task)
+    retry_record["error"] = error_text
+    retry_record["error_family"] = infer_error_family(error_text)
+    if error_text:
+        retry_record["task_description"] = (
+            f"{retry_record.get('task_description', '')}\n\nObserved failure:\n{error_text[:500]}"
+        ).strip()
+    reranked = rank_skill_cards_for_record(
+        skill_store,
+        retry_record,
+        limit=max(skill_top_k + len(previous_skill_ids), skill_top_k),
+        promoted_only=True,
+    )
+    preferred = [card for card in reranked if card["skill_id"] not in set(previous_skill_ids)]
+    if preferred:
+        return preferred[:skill_top_k]
+    return reranked[:skill_top_k]
+
+
 def _run_task_with_skill_cards(
     task: dict,
     llm_client,
     *,
     retrieved_skill_cards: list[dict],
+    skill_store: SkillStore | None = None,
+    skill_top_k: int = 1,
     eval_mode: str = "subprocess",
     eval_timeout: int = 30,
     max_tokens: int = 2048,
@@ -266,25 +301,39 @@ def _run_task_with_skill_cards(
     max_attempts: int = 1,
 ) -> dict:
     trajectory = []
+    retrieved_skill_history: list[list[str]] = []
+    current_skill_cards = list(retrieved_skill_cards)
 
     for attempt in range(1, max_attempts + 1):
-        if attempt == 1:
-            messages = _augment_messages_with_skill_cards(
-                format_messages(task, use_instruct=True),
-                retrieved_skill_cards,
-            )
-        else:
+        if attempt > 1:
             prev_error = trajectory[-1].get("error", "Unknown error")
+            if skill_store is not None:
+                reranked = _rerank_retry_skill_cards(
+                    task,
+                    skill_store,
+                    previous_skill_ids=[
+                        skill_id
+                        for history in retrieved_skill_history
+                        for skill_id in history
+                    ],
+                    error_text=prev_error,
+                    skill_top_k=skill_top_k,
+                )
+                if reranked:
+                    current_skill_cards = reranked
             retry_prompt = (
                 f"Your previous attempt failed with this error:\n"
                 f"{prev_error[:500]}\n\n"
                 f"Please fix the code and try again."
             )
-            messages = _augment_messages_with_skill_cards(
-                format_messages(task, use_instruct=True),
-                retrieved_skill_cards,
-            )
+
+        messages = _augment_messages_with_skill_cards(
+            format_messages(task, use_instruct=True),
+            current_skill_cards,
+        )
+        if attempt > 1:
             messages.append({"role": "user", "content": retry_prompt})
+        retrieved_skill_history.append([card["skill_id"] for card in current_skill_cards])
 
         try:
             response = llm_client.chat(
@@ -325,7 +374,8 @@ def _run_task_with_skill_cards(
         "success": success,
         "num_attempts": len(trajectory),
         "error": trajectory[-1].get("error") if trajectory else None,
-        "retrieved_skill_ids": [card["skill_id"] for card in retrieved_skill_cards],
+        "retrieved_skill_ids": list(dict.fromkeys(skill_id for history in retrieved_skill_history for skill_id in history)),
+        "retrieved_skill_history": retrieved_skill_history,
     }
 
 
@@ -373,6 +423,8 @@ def evaluate_new_arch_model(
                     task,
                     llm_client,
                     retrieved_skill_cards=retrieved_skill_cards,
+                    skill_store=skill_store,
+                    skill_top_k=skill_top_k,
                     eval_mode="subprocess",
                     eval_timeout=eval_timeout,
                     max_tokens=max_tokens,
@@ -402,6 +454,7 @@ def evaluate_new_arch_model(
                     "attempts": int(episode.get("num_attempts", 0) or 0),
                     "error": episode.get("error"),
                     "retrieved_skill_ids": list(episode.get("retrieved_skill_ids", []) or []),
+                    "retrieved_skill_history": list(episode.get("retrieved_skill_history", []) or []),
                 }
             )
 
@@ -436,6 +489,114 @@ def evaluate_new_arch_model(
         "skill_cards_path": skill_cards_path,
         "selected_skill_ids": dict(selected_skill_ids),
         "rows": rows,
+    }
+
+
+def _task_domain_label(task: dict) -> str:
+    libs = [str(lib).strip().lower() for lib in task.get("libs", []) or [] if str(lib).strip()]
+    if libs:
+        return libs[0]
+    description = str(task.get("instruct_prompt") or task.get("complete_prompt") or "").lower()
+    for domain in ("pandas", "numpy", "matplotlib", "glob", "pathlib", "json", "csv", "regex", "datetime"):
+        if domain in description:
+            return "file_io" if domain in {"glob", "pathlib", "json", "csv"} else domain
+    return "general"
+
+
+def _build_skill_utility(
+    tasks: list[dict],
+    baseline_rows: dict[str, dict[str, Any]],
+    routed_rows: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    utility: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = task["task_id"]
+        routed = routed_rows.get(task_id, {})
+        skill_ids = list(routed.get("retrieved_skill_ids", []) or [])
+        if not skill_ids:
+            continue
+        baseline = baseline_rows.get(task_id, {})
+        routed_pass = bool(routed.get("passed"))
+        baseline_pass = bool(baseline.get("passed"))
+        error_family = infer_error_family(routed.get("error"))
+        domain = _task_domain_label(task)
+        for skill_id in skill_ids:
+            stats = utility.setdefault(
+                skill_id,
+                {
+                    "retrieved": 0,
+                    "helped": 0,
+                    "hurt": 0,
+                    "preserved_success": 0,
+                    "preserved_failure": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "domains": Counter(),
+                    "error_families": Counter(),
+                    "task_ids": [],
+                },
+            )
+            stats["retrieved"] += 1
+            stats["passed"] += int(routed_pass)
+            stats["failed"] += int(not routed_pass)
+            if routed_pass and not baseline_pass:
+                stats["helped"] += 1
+            elif baseline_pass and not routed_pass:
+                stats["hurt"] += 1
+            elif routed_pass and baseline_pass:
+                stats["preserved_success"] += 1
+            else:
+                stats["preserved_failure"] += 1
+            stats["domains"][domain] += 1
+            if error_family:
+                stats["error_families"][error_family] += 1
+            if task_id not in stats["task_ids"]:
+                stats["task_ids"].append(task_id)
+
+    summarized: dict[str, dict[str, Any]] = {}
+    for skill_id, stats in utility.items():
+        retrieved = max(int(stats["retrieved"]), 1)
+        summarized[skill_id] = {
+            "retrieved": int(stats["retrieved"]),
+            "helped": int(stats["helped"]),
+            "hurt": int(stats["hurt"]),
+            "help_rate": int(stats["helped"]) / retrieved,
+            "hurt_rate": int(stats["hurt"]) / retrieved,
+            "passed": int(stats["passed"]),
+            "failed": int(stats["failed"]),
+            "domains": dict(stats["domains"]),
+            "error_families": dict(stats["error_families"]),
+            "task_ids": stats["task_ids"][:10],
+        }
+    return summarized
+
+
+def _compare_route_results(
+    tasks: list[dict],
+    baseline_eval: dict[str, Any],
+    candidate_eval: dict[str, Any],
+) -> dict[str, Any]:
+    baseline_rows = {row["task_id"]: row for row in baseline_eval.get("rows", [])}
+    candidate_rows = {row["task_id"]: row for row in candidate_eval.get("rows", [])}
+    task_ids = [task["task_id"] for task in tasks]
+    improved = [
+        task_id
+        for task_id in task_ids
+        if candidate_rows.get(task_id, {}).get("passed") and not baseline_rows.get(task_id, {}).get("passed")
+    ]
+    regressed = [
+        task_id
+        for task_id in task_ids
+        if baseline_rows.get(task_id, {}).get("passed") and not candidate_rows.get(task_id, {}).get("passed")
+    ]
+    task_count = max(len(task_ids), 1)
+    return {
+        "delta_passed": int(candidate_eval.get("passed", 0)) - int(baseline_eval.get("passed", 0)),
+        "delta_pass_rate": float(candidate_eval.get("pass_rate", 0.0)) - float(baseline_eval.get("pass_rate", 0.0)),
+        "improved_task_ids": improved,
+        "regressed_task_ids": regressed,
+        "regression_rate": len(regressed) / task_count,
+        "skill_utility": _build_skill_utility(tasks, baseline_rows, candidate_rows),
     }
 
 
@@ -543,27 +704,35 @@ def compare_new_arch_routes(
             verbose=verbose,
         )
 
-    base_rows = {row["task_id"]: row for row in results["base"]["rows"]}
-    adapter_rows = {row["task_id"]: row for row in results.get("adapter", {"rows": []})["rows"]}
-    shared_task_ids = [task["task_id"] for task in tasks]
-    improved = [
-        task_id
-        for task_id in shared_task_ids
-        if adapter_rows.get(task_id, {}).get("passed") and not base_rows.get(task_id, {}).get("passed")
-    ]
-    regressed = [
-        task_id
-        for task_id in shared_task_ids
-        if base_rows.get(task_id, {}).get("passed") and not adapter_rows.get(task_id, {}).get("passed")
-    ]
+    comparisons: dict[str, Any] = {}
+    if "base_plus_skill" in results:
+        comparisons["base_plus_skill_vs_base"] = _compare_route_results(
+            tasks,
+            results["base"],
+            results["base_plus_skill"],
+        )
+    if "adapter" in results:
+        comparisons["adapter_vs_base"] = _compare_route_results(
+            tasks,
+            results["base"],
+            results["adapter"],
+        )
+    if "adapter_plus_skill" in results and "adapter" in results:
+        comparisons["adapter_plus_skill_vs_adapter"] = _compare_route_results(
+            tasks,
+            results["adapter"],
+            results["adapter_plus_skill"],
+        )
+    adapter_comparison = comparisons.get("adapter_vs_base", {})
 
     return {
         **results,
         "task_count": results["base"]["task_count"],
-        "delta_passed": (results.get("adapter", {}).get("passed", 0) - results["base"]["passed"]) if adapter_path else None,
-        "delta_pass_rate": (results.get("adapter", {}).get("pass_rate", 0.0) - results["base"]["pass_rate"]) if adapter_path else None,
-        "improved_task_ids": improved,
-        "regressed_task_ids": regressed,
+        "comparisons": comparisons,
+        "delta_passed": adapter_comparison.get("delta_passed") if adapter_path else None,
+        "delta_pass_rate": adapter_comparison.get("delta_pass_rate") if adapter_path else None,
+        "improved_task_ids": adapter_comparison.get("improved_task_ids", []),
+        "regressed_task_ids": adapter_comparison.get("regressed_task_ids", []),
     }
 
 
@@ -785,16 +954,79 @@ def run_new_arch_qstar_cycle(
     *,
     cycle: int = 0,
     skill_cards_path: str | None = None,
+    eval_tasks: list[dict] | None = None,
+    eval_task_limit: int | None = None,
 ) -> dict[str, Any]:
     from cogmem.consolidation.pipeline import run_qstar_cycle
 
-    return run_qstar_cycle(
+    bank = MemoryBank.load(memory_bank_path)
+    eligible_episodes = filter_manifest_eligible(list(bank), cogmem_config)
+    eligible_bank = MemoryBank(eligible_episodes)
+    holdout_n = min(cogmem_config.min_holdout, len(eligible_episodes))
+    holdout_episodes, available_episodes = eligible_bank.stratified_holdout(holdout_n, seed=cogmem_config.seed)
+    skill_store = SkillStore.load(skill_cards_path) if skill_cards_path else SkillStore([])
+    promoted_cards = list(skill_store.filter(promoted=True))
+    skill_training_pairs = prepare_skill_training_dataset(
+        promoted_cards,
+        available_episodes,
+        config=cogmem_config,
+    )
+    route_gate = None
+    if skill_cards_path and eval_tasks:
+        route_eval = compare_new_arch_routes(
+            eval_tasks,
+            model_name=cogmem_config.active_model_hf,
+            skill_cards_path=skill_cards_path,
+            adapter_path=None,
+            skill_top_k=cogmem_config.skill_retrieval_top_k,
+            task_limit=eval_task_limit or cogmem_config.skill_route_gate_task_limit,
+            max_tokens=2048,
+            temperature=0.0,
+            max_attempts=1,
+            eval_timeout=30,
+            verbose=False,
+        )
+        route_gate = route_eval.get("comparisons", {}).get("base_plus_skill_vs_base", {})
+        min_delta_passed = int(getattr(cogmem_config, "skill_route_gate_min_delta_passed", 1))
+        max_regression_rate = float(getattr(cogmem_config, "skill_route_gate_max_regression_rate", 0.10))
+        if (
+            route_gate.get("delta_passed", 0) < min_delta_passed
+            or route_gate.get("regression_rate", 0.0) > max_regression_rate
+        ):
+            return {
+                "cycle": cycle,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "model": cogmem_config.active_model_hf,
+                "total_episodes": len(bank),
+                "high_q_episodes": sum(
+                    1
+                    for ep in available_episodes
+                    if float(ep.get("episode_helpfulness", ep.get("q_value", 0.0)) or 0.0) >= cogmem_config.q_threshold
+                ),
+                "preference_pairs": len(prepare_preference_dataset(available_episodes, cogmem_config)),
+                "generator_path": None,
+                "verifier_path": None,
+                "skill_cards_path": skill_cards_path,
+                "skill_cards_total": skill_store.summary().get("total", 0),
+                "skill_cards_promoted": skill_store.summary().get("promoted", 0),
+                "training_source": "skill_cards",
+                "training_examples": len(skill_training_pairs),
+                "adapter_registry_path": cogmem_config.adapter_registry_path,
+                "verification": {},
+                "status": "skipped_route_gate",
+                "route_gate": route_gate,
+            }
+
+    result = run_qstar_cycle(
         memory_bank_path,
         cogmem_config,
         cycle=cycle,
         run_task_fn=None,
         existing_skill_cards_path=skill_cards_path,
     )
+    if route_gate is not None:
+        result["route_gate"] = route_gate
+    return result
 
 
 __all__ = [

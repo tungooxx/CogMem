@@ -76,7 +76,7 @@ class CogMemConfig:
     skill_min_distinct_tasks: int = 2
     skill_confidence_threshold: float = 0.6
     skill_min_transfer_gain: float = 0.05
-    skill_validation_min_matches: int = 2
+    skill_validation_min_matches: int = 2  # interpreted as unique validated task matches
     skill_trigger_limit: int = 6
     skill_plan_limit: int = 5
     skill_curriculum_examples_per_card: int = 0
@@ -87,6 +87,9 @@ class CogMemConfig:
     min_promoted_skills_for_adapter: int = 3
     min_skill_families_for_adapter: int = 2
     min_skill_training_pairs_for_adapter: int = 48
+    skill_route_gate_task_limit: int = 30
+    skill_route_gate_min_delta_passed: int = 1
+    skill_route_gate_max_regression_rate: float = 0.10
 
     # --- Routed adapter memory ---
     adapter_route_min_dev_gain: float = 0.0

@@ -29,7 +29,7 @@ from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
 from cogmem.memory.memory_bank import MemoryBank
 from cogmem.memory.schema import get_episode_helpfulness
-from cogmem.memory.skill_store import SkillStore
+from cogmem.memory.skill_store import SkillStore, skill_family_key
 from cogmem.utils.logging import save_results
 
 
@@ -119,10 +119,10 @@ def run_qstar_cycle(
     )
     promoted_families = sorted(
         {
-            family
+            family_key
             for card in promoted_cards
-            for family in [card.get("task_type"), card.get("domain")]
-            if family
+            for family_key in [skill_family_key(card)]
+            if family_key
         }
     )
     print(

@@ -2,6 +2,7 @@ from cogmem.config import CogMemConfig
 from cogmem.consolidation.proceduralize import (
     build_skill_cards,
     proceduralize_episodes,
+    rank_skill_cards_for_task,
     validate_skill_card,
 )
 from cogmem.memory.memory_bank import MemoryBank
@@ -383,3 +384,118 @@ def test_validate_skill_card_requires_multiple_distinct_tasks_for_promotion(tmp_
     card = next(iter(store))
     assert card["distinct_task_count"] == 1
     assert card["status"] == "candidate"
+
+
+def test_validate_skill_card_uses_unique_matched_tasks_for_promotion(tmp_path):
+    train_episodes = [
+        _episode(
+            "ep_1",
+            "task_a",
+            "Use pandas groupby to aggregate dataframe rows",
+            success=True,
+            script="import pandas as pd\ndf.groupby('city').sum()",
+            q_value=0.9,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_2",
+            "task_b",
+            "Aggregate dataframe columns with pandas groupby",
+            success=True,
+            script="import pandas as pd\ndf.groupby('team').mean()",
+            q_value=0.85,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_3",
+            "task_c",
+            "Summarize dataframe totals via groupby",
+            success=True,
+            script="import pandas as pd\ndf.groupby('dept').size()",
+            q_value=0.82,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+    ]
+    dev_episodes = [
+        _episode(
+            "ep_4",
+            "dev_shared",
+            "Use pandas groupby to inspect dataframe totals",
+            success=True,
+            script="import pandas as pd\ndf.groupby('name').count()",
+            q_value=0.95,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_5",
+            "dev_shared",
+            "Use pandas groupby to inspect dataframe totals again",
+            success=True,
+            script="import pandas as pd\ndf.groupby('name').sum()",
+            q_value=0.91,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+    ]
+    cfg = CogMemConfig(
+        skill_min_evidence=3,
+        skill_min_distinct_tasks=2,
+        skill_validation_min_matches=2,
+        skill_min_transfer_gain=0.0,
+        skill_confidence_threshold=0.0,
+    )
+
+    store = build_skill_cards(train_episodes, dev_episodes, config=cfg, output_path=str(tmp_path / "skills.json"))
+
+    card = next(iter(store))
+    assert card["validation"]["matched_episodes"] == 2
+    assert card["validation"]["matched_tasks"] == 1
+    assert card["status"] == "candidate"
+
+
+def test_rank_skill_cards_penalizes_negative_transfer_and_stop_risk():
+    cards = [
+        {
+            "skill_id": "skill_good",
+            "task_type": "matplotlib:plot",
+            "domain": "matplotlib",
+            "triggers": ["matplotlib", "plot", "axes"],
+            "activation_conditions": ["the task prompt mentions matplotlib plot"],
+            "stop_conditions": ["stop and reassess if the mismatch comes from task expectations rather than plot construction"],
+            "transfer_gain": 0.6,
+            "confidence": 0.9,
+            "negative_transfer_rate": 0.0,
+            "status": "promoted",
+        },
+        {
+            "skill_id": "skill_bad",
+            "task_type": "matplotlib:plot",
+            "domain": "matplotlib",
+            "triggers": ["matplotlib", "plot", "axes"],
+            "activation_conditions": ["the task prompt mentions matplotlib plot"],
+            "stop_conditions": ["stop and reassess if the failure mode or traceback points to AssertionError"],
+            "transfer_gain": 0.1,
+            "confidence": 0.4,
+            "negative_transfer_rate": 0.8,
+            "runtime_stats": {"retrieved": 5, "helped": 1, "hurt": 3},
+            "status": "promoted",
+        },
+    ]
+
+    ranked = rank_skill_cards_for_task(
+        cards,
+        {
+            "task_id": "task_plot",
+            "instruct_prompt": "Plot values with matplotlib and fix the AssertionError in the chart output",
+            "libs": ["matplotlib"],
+            "error": "AssertionError: chart mismatch",
+        },
+        limit=2,
+        promoted_only=True,
+    )
+
+    assert [card["skill_id"] for card in ranked] == ["skill_good", "skill_bad"]
