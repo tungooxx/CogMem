@@ -105,10 +105,18 @@ class TransformersChatClient:
 
 def _ensure_torch_pytree_compat() -> None:
     """Backfill older torch pytree API expected by newer transformers."""
+    import inspect
     import torch.utils._pytree as pytree
 
     if not hasattr(pytree, "register_pytree_node") and hasattr(pytree, "_register_pytree_node"):
-        pytree.register_pytree_node = pytree._register_pytree_node
+        legacy_register = pytree._register_pytree_node
+        supported_kwargs = set(inspect.signature(legacy_register).parameters)
+
+        def register_pytree_node(*args, **kwargs):
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported_kwargs}
+            return legacy_register(*args, **filtered_kwargs)
+
+        pytree.register_pytree_node = register_pytree_node
 
 
 def load_new_arch_tasks(
