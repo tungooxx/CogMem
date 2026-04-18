@@ -34,7 +34,6 @@ from cogmem.consolidation.abstract import (
     prepare_preference_dataset,
     prepare_skill_training_dataset,
 )
-from cogmem.consolidation.pipeline import run_qstar_cycle
 from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import filter_manifest_eligible
 from cogmem.memory.memory_bank import MemoryBank
@@ -399,6 +398,8 @@ def run_new_arch_qstar_cycle(
     *,
     cycle: int = 0,
 ) -> dict[str, Any]:
+    from cogmem.consolidation.pipeline import run_qstar_cycle
+
     return run_qstar_cycle(memory_bank_path, cogmem_config, cycle=cycle, run_task_fn=None)
 
 
