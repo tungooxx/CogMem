@@ -45,14 +45,18 @@ def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target["skill_id"] = _skill_id(target)
     target["triggers"] = _dedupe_str_list(target.get("triggers", []))
     target["plan_steps"] = _dedupe_str_list(target.get("plan_steps", []))
+    target["activation_conditions"] = _dedupe_str_list(target.get("activation_conditions", []))
+    target["stop_conditions"] = _dedupe_str_list(target.get("stop_conditions", []))
     target["anti_patterns"] = _dedupe_str_list(target.get("anti_patterns", []))
     target["evidence_episode_ids"] = _dedupe_str_list(target.get("evidence_episode_ids", []))
+    target["evidence_task_ids"] = _dedupe_str_list(target.get("evidence_task_ids", []))
     target["manifest_ids"] = sorted(set(_dedupe_str_list(target.get("manifest_ids", []))))
     target["validation"] = dict(target.get("validation", {}) or {})
     target["task_type"] = str(target.get("task_type", "general") or "general")
     target["domain"] = str(target.get("domain", "general") or "general")
     target["error_family"] = target.get("error_family")
     target["source_episode_count"] = int(target.get("source_episode_count") or len(target["evidence_episode_ids"]))
+    target["distinct_task_count"] = int(target.get("distinct_task_count") or len(target["evidence_task_ids"]))
     transfer_gain = float(target.get("transfer_gain", target.get(CARD_TRANSFER_GAIN_KEY, 0.0)) or 0.0)
     confidence = _clamp01(target.get("confidence", target.get(RETRIEVAL_CONFIDENCE_KEY, 0.0)) or 0.0)
     negative_transfer_rate = _clamp01(
@@ -66,6 +70,36 @@ def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target[NEGATIVE_TRANSFER_RATE_KEY] = negative_transfer_rate
     target["status"] = str(target.get("status", "candidate") or "candidate")
     return target
+
+
+def render_skill_card_context(card: dict, *, include_header: bool = True) -> str:
+    normalized = normalize_skill_card(card, copy_card=True)
+    lines: list[str] = []
+
+    if include_header:
+        lines.append(
+            "Retrieved skill: {} ({})".format(
+                normalized.get("task_type", "general"),
+                normalized.get("domain", "general"),
+            )
+        )
+    if normalized.get("activation_conditions"):
+        lines.append("Use this when:")
+        for item in normalized["activation_conditions"][:4]:
+            lines.append(f"- {item}")
+    if normalized.get("plan_steps"):
+        lines.append("Procedure:")
+        for idx, item in enumerate(normalized["plan_steps"][:5], start=1):
+            lines.append(f"{idx}. {item}")
+    if normalized.get("stop_conditions"):
+        lines.append("Stop and reconsider if:")
+        for item in normalized["stop_conditions"][:4]:
+            lines.append(f"- {item}")
+    if normalized.get("anti_patterns"):
+        lines.append("Avoid:")
+        for item in normalized["anti_patterns"][:4]:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
 
 
 class SkillStore:
@@ -154,4 +188,11 @@ class SkillStore:
             "promoted": len(promoted),
             "mean_confidence": sum(card["confidence"] for card in self._cards) / len(self._cards),
             "mean_transfer_gain": sum(card["transfer_gain"] for card in self._cards) / len(self._cards),
+            "promoted_families": len(
+                {
+                    card.get("task_type") or card.get("domain")
+                    for card in promoted
+                    if card.get("task_type") or card.get("domain")
+                }
+            ),
         }

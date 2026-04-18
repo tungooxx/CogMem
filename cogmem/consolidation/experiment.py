@@ -21,7 +21,9 @@ from cogmem.benchmarks.bigcodebench.dataset import (
     load_bigcodebench,
     load_bigcodebench_from_jsonl,
 )
+from cogmem.benchmarks.bigcodebench.evaluator import evaluate_solution
 from cogmem.benchmarks.bigcodebench.experiment import materialize_split_views
+from cogmem.benchmarks.bigcodebench.prompts import extract_code, format_messages
 from cogmem.benchmarks.bigcodebench.runner import run_single_task
 from cogmem.benchmarks.bigcodebench.splits import (
     annotate_tasks_with_manifest,
@@ -34,10 +36,10 @@ from cogmem.consolidation.abstract import (
     prepare_preference_dataset,
     prepare_skill_training_dataset,
 )
-from cogmem.consolidation.proceduralize import build_skill_cards
+from cogmem.consolidation.proceduralize import build_skill_cards, rank_skill_cards_for_task
 from cogmem.consolidation.select import filter_manifest_eligible
 from cogmem.memory.memory_bank import MemoryBank
-from cogmem.memory.skill_store import SkillStore
+from cogmem.memory.skill_store import SkillStore, render_skill_card_context
 
 
 @dataclass
@@ -238,11 +240,102 @@ def _release_new_arch_runtime(model=None, tokenizer=None, llm_client=None) -> No
         pass
 
 
+def _augment_messages_with_skill_cards(messages: list[dict], skill_cards: list[dict]) -> list[dict]:
+    if not skill_cards:
+        return messages
+    augmented = [dict(message) for message in messages]
+    augmented[0]["content"] = (
+        augmented[0]["content"]
+        + "\n\nWhen activation conditions match, use the retrieved validated procedural memory below."
+        + " Apply it as guidance, not as code to copy blindly."
+    )
+    skill_blocks = "\n\n".join(render_skill_card_context(card) for card in skill_cards)
+    augmented[1]["content"] = f"Retrieved procedural memory:\n{skill_blocks}\n\nTask:\n{augmented[1]['content']}"
+    return augmented
+
+
+def _run_task_with_skill_cards(
+    task: dict,
+    llm_client,
+    *,
+    retrieved_skill_cards: list[dict],
+    eval_mode: str = "subprocess",
+    eval_timeout: int = 30,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 1,
+) -> dict:
+    trajectory = []
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt == 1:
+            messages = _augment_messages_with_skill_cards(
+                format_messages(task, use_instruct=True),
+                retrieved_skill_cards,
+            )
+        else:
+            prev_error = trajectory[-1].get("error", "Unknown error")
+            retry_prompt = (
+                f"Your previous attempt failed with this error:\n"
+                f"{prev_error[:500]}\n\n"
+                f"Please fix the code and try again."
+            )
+            messages = _augment_messages_with_skill_cards(
+                format_messages(task, use_instruct=True),
+                retrieved_skill_cards,
+            )
+            messages.append({"role": "user", "content": retry_prompt})
+
+        try:
+            response = llm_client.chat(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            trajectory.append(
+                {
+                    "attempt": attempt,
+                    "code": "",
+                    "response": "",
+                    "test_result": "ERROR",
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        code = extract_code(response, task)
+        result = evaluate_solution(task, code, timeout=eval_timeout, mode=eval_mode)
+        passed = result["passed"]
+        trajectory.append(
+            {
+                "attempt": attempt,
+                "code": code,
+                "response": response,
+                "test_result": "PASS" if passed else "FAIL",
+                "error": result.get("error") if not passed else None,
+            }
+        )
+        if passed:
+            break
+
+    success = any(step["test_result"] == "PASS" for step in trajectory)
+    return {
+        "task_id": task["task_id"],
+        "success": success,
+        "num_attempts": len(trajectory),
+        "error": trajectory[-1].get("error") if trajectory else None,
+        "retrieved_skill_ids": [card["skill_id"] for card in retrieved_skill_cards],
+    }
+
+
 def evaluate_new_arch_model(
     eval_tasks: list[dict],
     *,
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
     adapter_path: str | None = None,
+    skill_cards_path: str | None = None,
+    skill_top_k: int = 1,
     task_limit: int | None = None,
     max_tokens: int = 2048,
     temperature: float = 0.0,
@@ -255,6 +348,8 @@ def evaluate_new_arch_model(
     rows: list[dict[str, Any]] = []
     passed = 0
     start_time = time.time()
+    skill_store = SkillStore.load(skill_cards_path) if skill_cards_path else None
+    selected_skill_ids: Counter[str] = Counter()
 
     try:
         model, tokenizer, llm_client = load_new_arch_runtime(
@@ -263,18 +358,42 @@ def evaluate_new_arch_model(
         )
 
         for idx, task in enumerate(tasks):
-            episode = run_single_task(
-                task,
-                llm_client,
-                eval_mode="subprocess",
-                eval_timeout=eval_timeout,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                max_attempts=max_attempts,
+            retrieved_skill_cards = (
+                rank_skill_cards_for_task(
+                    skill_store,
+                    task,
+                    limit=skill_top_k,
+                    promoted_only=True,
+                )
+                if skill_store is not None
+                else []
             )
+            if retrieved_skill_cards:
+                episode = _run_task_with_skill_cards(
+                    task,
+                    llm_client,
+                    retrieved_skill_cards=retrieved_skill_cards,
+                    eval_mode="subprocess",
+                    eval_timeout=eval_timeout,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    max_attempts=max_attempts,
+                )
+            else:
+                episode = run_single_task(
+                    task,
+                    llm_client,
+                    eval_mode="subprocess",
+                    eval_timeout=eval_timeout,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    max_attempts=max_attempts,
+                )
             success = bool(episode.get("success"))
             if success:
                 passed += 1
+            for skill_id in episode.get("retrieved_skill_ids", []) or []:
+                selected_skill_ids[skill_id] += 1
 
             rows.append(
                 {
@@ -282,13 +401,17 @@ def evaluate_new_arch_model(
                     "passed": success,
                     "attempts": int(episode.get("num_attempts", 0) or 0),
                     "error": episode.get("error"),
+                    "retrieved_skill_ids": list(episode.get("retrieved_skill_ids", []) or []),
                 }
             )
 
             if verbose and ((idx + 1) % 10 == 0 or idx < 5):
                 elapsed = time.time() - start_time
                 rate = (idx + 1) / elapsed * 3600 if elapsed > 0 else 0.0
-                label = "adapter" if adapter_path else "base"
+                label_parts = ["adapter" if adapter_path else "base"]
+                if skill_store is not None:
+                    label_parts.append("skill")
+                label = "+".join(label_parts)
                 print(
                     "[{}/{}] {} | {}={} | pass_rate={:.1%} | {:.0f}/hr".format(
                         idx + 1,
@@ -310,6 +433,8 @@ def evaluate_new_arch_model(
         "passed": passed,
         "pass_rate": passed / task_count if task_count else 0.0,
         "elapsed_minutes": (time.time() - start_time) / 60.0,
+        "skill_cards_path": skill_cards_path,
+        "selected_skill_ids": dict(selected_skill_ids),
         "rows": rows,
     }
 
@@ -326,24 +451,11 @@ def compare_new_arch_base_vs_adapter(
     eval_timeout: int = 30,
     verbose: bool = False,
 ) -> dict[str, Any]:
-    if not adapter_path:
-        raise ValueError("adapter_path is required for base-vs-adapter comparison")
-
-    base_eval = evaluate_new_arch_model(
-        eval_tasks,
-        model_name=model_name,
-        adapter_path=None,
-        task_limit=task_limit,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        max_attempts=max_attempts,
-        eval_timeout=eval_timeout,
-        verbose=verbose,
-    )
-    adapter_eval = evaluate_new_arch_model(
+    result = compare_new_arch_routes(
         eval_tasks,
         model_name=model_name,
         adapter_path=adapter_path,
+        skill_cards_path=None,
         task_limit=task_limit,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -351,11 +463,89 @@ def compare_new_arch_base_vs_adapter(
         eval_timeout=eval_timeout,
         verbose=verbose,
     )
+    base_eval = result["base"]
+    adapter_eval = result["adapter"]
+    return {
+        "task_count": result["task_count"],
+        "base": base_eval,
+        "adapter": adapter_eval,
+        "delta_passed": adapter_eval["passed"] - base_eval["passed"],
+        "delta_pass_rate": adapter_eval["pass_rate"] - base_eval["pass_rate"],
+        "improved_task_ids": result["improved_task_ids"],
+        "regressed_task_ids": result["regressed_task_ids"],
+    }
 
-    base_rows = {row["task_id"]: row for row in base_eval["rows"]}
-    adapter_rows = {row["task_id"]: row for row in adapter_eval["rows"]}
-    shared_task_ids = [task["task_id"] for task in (eval_tasks[:task_limit] if task_limit else eval_tasks)]
 
+def compare_new_arch_routes(
+    eval_tasks: list[dict],
+    *,
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    skill_cards_path: str | None = None,
+    adapter_path: str | None = None,
+    skill_top_k: int = 1,
+    task_limit: int | None = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 1,
+    eval_timeout: int = 30,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    tasks = list(eval_tasks[:task_limit]) if task_limit else list(eval_tasks)
+    results: dict[str, Any] = {}
+
+    results["base"] = evaluate_new_arch_model(
+        tasks,
+        model_name=model_name,
+        adapter_path=None,
+        skill_cards_path=None,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        max_attempts=max_attempts,
+        eval_timeout=eval_timeout,
+        verbose=verbose,
+    )
+    if skill_cards_path:
+        results["base_plus_skill"] = evaluate_new_arch_model(
+            tasks,
+            model_name=model_name,
+            adapter_path=None,
+            skill_cards_path=skill_cards_path,
+            skill_top_k=skill_top_k,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_attempts=max_attempts,
+            eval_timeout=eval_timeout,
+            verbose=verbose,
+        )
+    if adapter_path:
+        results["adapter"] = evaluate_new_arch_model(
+            tasks,
+            model_name=model_name,
+            adapter_path=adapter_path,
+            skill_cards_path=None,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_attempts=max_attempts,
+            eval_timeout=eval_timeout,
+            verbose=verbose,
+        )
+    if adapter_path and skill_cards_path:
+        results["adapter_plus_skill"] = evaluate_new_arch_model(
+            tasks,
+            model_name=model_name,
+            adapter_path=adapter_path,
+            skill_cards_path=skill_cards_path,
+            skill_top_k=skill_top_k,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_attempts=max_attempts,
+            eval_timeout=eval_timeout,
+            verbose=verbose,
+        )
+
+    base_rows = {row["task_id"]: row for row in results["base"]["rows"]}
+    adapter_rows = {row["task_id"]: row for row in results.get("adapter", {"rows": []})["rows"]}
+    shared_task_ids = [task["task_id"] for task in tasks]
     improved = [
         task_id
         for task_id in shared_task_ids
@@ -368,11 +558,10 @@ def compare_new_arch_base_vs_adapter(
     ]
 
     return {
-        "task_count": base_eval["task_count"],
-        "base": base_eval,
-        "adapter": adapter_eval,
-        "delta_passed": adapter_eval["passed"] - base_eval["passed"],
-        "delta_pass_rate": adapter_eval["pass_rate"] - base_eval["pass_rate"],
+        **results,
+        "task_count": results["base"]["task_count"],
+        "delta_passed": (results.get("adapter", {}).get("passed", 0) - results["base"]["passed"]) if adapter_path else None,
+        "delta_pass_rate": (results.get("adapter", {}).get("pass_rate", 0.0) - results["base"]["pass_rate"]) if adapter_path else None,
         "improved_task_ids": improved,
         "regressed_task_ids": regressed,
     }
@@ -530,13 +719,17 @@ def _skill_rows(store: SkillStore, *, limit: int = 10) -> list[dict[str, Any]]:
             "domain": card.get("domain", "general"),
             "error_family": card.get("error_family"),
             "source_episode_count": int(card.get("source_episode_count", 0) or 0),
+            "distinct_task_count": int(card.get("distinct_task_count", 0) or 0),
             "confidence": float(card.get("confidence", 0.0) or 0.0),
             "transfer_gain": float(card.get("transfer_gain", 0.0) or 0.0),
             "negative_transfer_rate": float(card.get("negative_transfer_rate", 0.0) or 0.0),
             "matched_episodes": int(validation.get("matched_episodes", 0) or 0),
+            "matched_tasks": int(validation.get("matched_tasks", 0) or 0),
             "success_rate": float(validation.get("success_rate", 0.0) or 0.0),
             "triggers": list(card.get("triggers", [])[:5]),
             "plan_steps": list(card.get("plan_steps", [])[:3]),
+            "activation_conditions": list(card.get("activation_conditions", [])[:3]),
+            "stop_conditions": list(card.get("stop_conditions", [])[:3]),
             "anti_patterns": list(card.get("anti_patterns", [])[:3]),
             "manifest_ids": list(card.get("manifest_ids", [])),
         })
@@ -612,6 +805,7 @@ __all__ = [
     "load_new_arch_runtime",
     "evaluate_new_arch_model",
     "compare_new_arch_base_vs_adapter",
+    "compare_new_arch_routes",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",
     "run_new_arch_qstar_cycle",

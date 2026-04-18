@@ -52,6 +52,12 @@ PLAN_STEP_STOPWORDS = {
 }
 
 
+def _add_unique(items: list[str], value: str | None) -> None:
+    text = str(value or "").strip()
+    if text and text not in items:
+        items.append(text)
+
+
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -67,6 +73,16 @@ def _episode_domain(episode: dict) -> str:
     code = episode.get("final_code") or episode.get("generated_code") or episode.get("script") or ""
     desc = episode.get("task_description", "")
     return categorize_domain(code, desc)
+
+
+def task_to_skill_record(task: dict) -> dict:
+    return {
+        "task_description": task.get("instruct_prompt") or task.get("complete_prompt") or "",
+        "libs": list(task.get("libs", []) or []),
+        "entry_point": task.get("entry_point", "") or "",
+        "task_type": task.get("task_type", "bigcodebench") or "bigcodebench",
+        "error": task.get("error"),
+    }
 
 
 def _feature_bucket(episode: dict, domain: str | None = None) -> str:
@@ -139,37 +155,126 @@ def _derive_triggers(episodes: list[dict], limit: int) -> list[str]:
     return ordered[:limit]
 
 
-def _derive_plan_steps(success_episodes: list[dict], limit: int) -> list[str]:
-    steps = Counter()
-    for ep in success_episodes:
-        source = ep.get("final_code") or ep.get("generated_code") or ep.get("script") or ""
-        for raw_line in source.splitlines():
-            line = re.sub(r"^\d+\.\s*", "", raw_line.strip())
-            lowered = line.lower()
-            if (
-                4 <= len(line) <= 100
-                and lowered not in PLAN_STEP_STOPWORDS
-                and not lowered.startswith("```")
-                and not lowered.startswith("here")
-                and not lowered.startswith("thought:")
-                and not lowered.startswith("observation:")
-                and not lowered.startswith("analysis:")
-                and not lowered.startswith("to solve")
-                and not lowered.startswith("we ")
-                and not lowered.startswith("let's")
-                and not lowered.startswith("i need")
-            ):
-                if source == (ep.get("final_code") or ep.get("generated_code") or ""):
-                    if not re.search(
-                        r"(import |from | = | for | if | while | return |append\(|read_|write_|"
-                        r"groupby\(|plot\(|json\.|np\.|pd\.|plt\.|Path\(|glob\.)",
-                        line,
-                    ):
-                        continue
-                steps[line] += 1
-    if steps:
-        return [step for step, _ in steps.most_common(limit)]
-    return extract_function_patterns(success_episodes)[:limit]
+def _derive_plan_steps(
+    success_episodes: list[dict],
+    failure_episodes: list[dict],
+    *,
+    domain: str,
+    feature: str,
+    error_family: str | None,
+    limit: int,
+) -> list[str]:
+    steps: list[str] = []
+    if failure_episodes or error_family:
+        _add_unique(steps, "inspect the traceback or failing assertion before rewriting logic")
+    if error_family == "ModuleNotFoundError":
+        _add_unique(steps, "check import paths and dependency availability before changing the algorithm")
+    if error_family == "FileNotFoundError":
+        _add_unique(steps, "verify file paths and existence before debugging downstream logic")
+    if error_family == "KeyError":
+        _add_unique(steps, "validate required keys or column names before indexing into data structures")
+    if error_family == "AssertionError":
+        _add_unique(steps, "reproduce the expected output and compare intermediate values before broad rewrites")
+
+    domain_defaults = {
+        "pandas": [
+            "validate dataframe columns and dtypes before aggregation or joins",
+            "check groupby or merge keys before transforming the dataframe",
+        ],
+        "numpy": [
+            "check array shape and dtype before vectorized operations",
+            "verify broadcasting assumptions before changing numeric logic",
+        ],
+        "matplotlib": [
+            "verify figure and axes construction before styling or saving plots",
+            "check that plotted series align in length before adjusting formatting",
+        ],
+        "file_io": [
+            "validate paths, permissions, and file existence before reading or writing",
+            "confirm serialization format before parsing persisted data",
+        ],
+        "math": [
+            "check numeric bounds and randomization assumptions before tuning formulas",
+            "verify edge cases for empty inputs and rounding before optimizing logic",
+        ],
+        "string": [
+            "normalize delimiters and whitespace before joining or splitting text",
+            "check encoding and character assumptions before rewriting parsing logic",
+        ],
+        "crypto": [
+            "verify byte or string encoding before hashing, signing, or decoding",
+        ],
+    }
+    for item in domain_defaults.get(domain, ["reproduce the failing case with minimal assumptions before broad rewrites"]):
+        _add_unique(steps, item)
+
+    feature_hints = {
+        "columns": "validate referenced dataframe columns before aggregation",
+        "groupby": "verify grouping keys and aggregation targets before refactoring",
+        "merge": "confirm join keys and expected cardinality before changing merge logic",
+        "plot": "check axes state and plotted series before changing rendering code",
+        "read_csv": "verify CSV parsing options and required columns before changing transformation logic",
+        "glob": "inspect path patterns and matched files before changing traversal logic",
+        "json": "validate expected JSON schema before rewriting parsing code",
+        "reshape": "check array dimensions before reshaping or flattening data",
+        "ndarray": "validate array shape and indexing assumptions before numeric changes",
+        "random": "fix the expected random seed or bounds before changing generation logic",
+    }
+    if feature in feature_hints:
+        _add_unique(steps, feature_hints[feature])
+
+    if any("import " in (ep.get("final_code") or ep.get("generated_code") or ep.get("script") or "") for ep in success_episodes):
+        _add_unique(steps, "check imports and setup steps before debugging the core function body")
+
+    return steps[:limit]
+
+
+def _derive_activation_conditions(
+    success_episodes: list[dict],
+    *,
+    task_type: str,
+    domain: str,
+    feature: str,
+    error_family: str | None,
+    triggers: list[str],
+    limit: int,
+) -> list[str]:
+    conditions: list[str] = []
+    named_triggers = [token for token in triggers if token not in {domain, feature}][:4]
+    if domain != "general":
+        trigger_text = ", ".join([domain] + ([feature] if feature and feature != domain else []) + named_triggers[:2])
+        _add_unique(conditions, f"the task prompt mentions {trigger_text}")
+    if error_family:
+        _add_unique(conditions, f"the failure mode or traceback points to {error_family}")
+    if task_type and task_type not in GENERIC_TASK_TYPES:
+        _add_unique(conditions, f"the task belongs to the {task_type} pattern")
+    _add_unique(conditions, "the same high-level bug pattern appears across multiple similar tasks")
+    return conditions[:limit]
+
+
+def _derive_stop_conditions(
+    *,
+    domain: str,
+    feature: str,
+    error_family: str | None,
+    anti_patterns: list[str],
+    limit: int,
+) -> list[str]:
+    conditions: list[str] = []
+    if error_family == "ModuleNotFoundError":
+        _add_unique(conditions, "stop and reassess if the required library is unavailable in the environment")
+    if error_family == "AssertionError":
+        _add_unique(conditions, "stop and reassess if intermediate values already match the intended logic")
+    if feature == "columns":
+        _add_unique(conditions, "stop and reassess if the required dataframe columns are genuinely absent")
+    if domain == "file_io":
+        _add_unique(conditions, "stop and reassess if the issue is missing input data rather than broken logic")
+    if domain == "matplotlib":
+        _add_unique(conditions, "stop and reassess if the mismatch comes from task expectations rather than plot construction")
+    for pattern in anti_patterns[: max(limit - len(conditions), 0)]:
+        suffix = pattern.replace("avoid ", "")
+        _add_unique(conditions, f"stop and reassess if you are still triggering {suffix}")
+    return conditions[:limit]
 
 
 def _derive_anti_patterns(failure_episodes: list[dict], limit: int) -> list[str]:
@@ -207,19 +312,46 @@ def proceduralize_episodes(episodes: list[dict], config=None) -> list[dict]:
         failures = [ep for ep in all_group if not ep.get("success")]
         domain_counts = Counter(_episode_domain(ep) for ep in successes)
         domain = domain_counts.most_common(1)[0][0] if domain_counts else "general"
+        feature = _feature_bucket(successes[0], domain) if successes else domain
         manifests = sorted({ep.get("manifest_id") for ep in all_group if ep.get("manifest_id")})
+        evidence_task_ids = sorted({ep.get("task_id") for ep in successes if ep.get("task_id")})
         error_family = None
         if failures:
             error_counts = Counter(ep.get("error_family") for ep in failures if ep.get("error_family"))
             if error_counts:
                 error_family = error_counts.most_common(1)[0][0]
+        triggers = _derive_triggers(successes, trigger_limit)
+        anti_patterns = _derive_anti_patterns(failures, plan_limit)
         card = {
             "task_type": task_type,
             "domain": domain,
             "error_family": error_family,
-            "triggers": _derive_triggers(successes, trigger_limit),
-            "plan_steps": _derive_plan_steps(successes, plan_limit),
-            "anti_patterns": _derive_anti_patterns(failures, plan_limit),
+            "triggers": triggers,
+            "activation_conditions": _derive_activation_conditions(
+                successes,
+                task_type=task_type,
+                domain=domain,
+                feature=feature,
+                error_family=error_family,
+                triggers=triggers,
+                limit=plan_limit,
+            ),
+            "plan_steps": _derive_plan_steps(
+                successes,
+                failures,
+                domain=domain,
+                feature=feature,
+                error_family=error_family,
+                limit=plan_limit,
+            ),
+            "stop_conditions": _derive_stop_conditions(
+                domain=domain,
+                feature=feature,
+                error_family=error_family,
+                anti_patterns=anti_patterns,
+                limit=plan_limit,
+            ),
+            "anti_patterns": anti_patterns,
             "validation": {
                 "status": "candidate",
                 "recipe_kinds": sorted(
@@ -230,10 +362,12 @@ def proceduralize_episodes(episodes: list[dict], config=None) -> list[dict]:
                 ),
             },
             "evidence_episode_ids": [ep["episode_id"] for ep in successes],
+            "evidence_task_ids": evidence_task_ids,
             "manifest_ids": manifests,
             "transfer_gain": mean(get_episode_helpfulness(ep, 0.0) for ep in successes),
             "confidence": _clamp01(mean(get_episode_helpfulness(ep, 0.0) for ep in successes)),
             "source_episode_count": len(successes),
+            "distinct_task_count": len(evidence_task_ids),
             "status": "candidate",
         }
         cards.append(normalize_skill_card(card, copy_card=True))
@@ -272,8 +406,10 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
     min_matches = int(getattr(config, "skill_validation_min_matches", 2))
     min_transfer_gain = float(getattr(config, "skill_min_transfer_gain", 0.05))
     min_confidence = float(getattr(config, "skill_confidence_threshold", 0.6))
+    min_distinct_tasks = int(getattr(config, "skill_min_distinct_tasks", 2))
 
     matches = [ep for ep in eligible if _card_matches_episode(card, ep)]
+    matched_task_ids = sorted({ep.get("task_id") for ep in matches if ep.get("task_id")})
     baseline_pool = [ep for ep in eligible if ep.get("episode_id") not in set(card.get("evidence_episode_ids", []))]
     match_helpfulness = [get_episode_helpfulness(ep, 0.0) for ep in matches]
     baseline_helpfulness = [get_episode_helpfulness(ep, 0.0) for ep in baseline_pool]
@@ -285,6 +421,7 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
         else 0.0
     )
     support_factor = min(1.0, len(matches) / max(min_matches, 1))
+    evidence_task_count = int(card.get("distinct_task_count") or len(card.get("evidence_task_ids", []) or []))
     confidence = _clamp01(
         0.35 * support_factor
         + 0.35 * success_rate
@@ -294,6 +431,7 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
     )
     status = "promoted" if (
         len(matches) >= min_matches
+        and evidence_task_count >= min_distinct_tasks
         and transfer_gain >= min_transfer_gain
         and confidence >= min_confidence
     ) else "candidate"
@@ -307,12 +445,82 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
         **dict(card.get("validation", {})),
         "status": status,
         "matched_episodes": len(matches),
+        "matched_tasks": len(matched_task_ids),
+        "evidence_task_count": evidence_task_count,
         "success_rate": success_rate,
         "transfer_gain": transfer_gain,
         "negative_transfer_rate": negative_transfer_rate,
-        "validated_task_ids": sorted({ep.get("task_id") for ep in matches if ep.get("task_id")})[:20],
+        "validated_task_ids": matched_task_ids[:20],
     }
     return normalize_skill_card(updated, copy_card=True)
+
+
+def _skill_match_score(card: dict, record: dict) -> float:
+    record_group = _group_key(record)
+    record_domain = _episode_domain(record)
+    record_feature = _feature_bucket(record, record_domain)
+    record_tokens = _episode_hint_tokens(record)
+    score = 0.0
+
+    if card.get("task_type") == record_group:
+        score += 4.0
+    if card.get("domain") == record_domain and record_domain != "general":
+        score += 2.0
+
+    card_feature = _card_feature(card)
+    if card_feature and card_feature == record_feature:
+        score += 2.0
+
+    trigger_tokens = {token.lower() for token in card.get("triggers", []) if token.lower() not in TRIGGER_STOPWORDS}
+    score += 0.6 * len(record_tokens & trigger_tokens)
+
+    activation_text = " ".join(card.get("activation_conditions", []) or []).lower()
+    if activation_text:
+        score += 0.25 * sum(1 for token in record_tokens if token in activation_text)
+
+    if card.get("error_family"):
+        error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
+        if error_family and error_family == card.get("error_family"):
+            score += 1.5
+
+    return score
+
+
+def rank_skill_cards_for_record(
+    store: SkillStore | list[dict],
+    record: dict,
+    *,
+    limit: int = 1,
+    promoted_only: bool = True,
+) -> list[dict]:
+    if isinstance(store, SkillStore):
+        cards = list(store.filter(promoted=True)) if promoted_only else list(store)
+    else:
+        cards = [normalize_skill_card(card, copy_card=True) for card in store]
+        if promoted_only:
+            cards = [card for card in cards if card.get("status") == "promoted"]
+    scored = []
+    for card in cards:
+        score = _skill_match_score(card, record)
+        if score > 0:
+            scored.append((score, card))
+    scored.sort(key=lambda item: (-item[0], -float(item[1].get("confidence", 0.0) or 0.0), item[1]["skill_id"]))
+    return [card for _, card in scored[:limit]]
+
+
+def rank_skill_cards_for_task(
+    store: SkillStore | list[dict],
+    task: dict,
+    *,
+    limit: int = 1,
+    promoted_only: bool = True,
+) -> list[dict]:
+    return rank_skill_cards_for_record(
+        store,
+        task_to_skill_record(task),
+        limit=limit,
+        promoted_only=promoted_only,
+    )
 
 
 def validate_skill_cards(cards: list[dict], dev_episodes: list[dict], config=None) -> list[dict]:

@@ -135,10 +135,11 @@ class TestPrepareSkillTrainingDataset:
         assert [pair["source_kind"] for pair in pairs] == [
             "skill_evidence",
             "skill_evidence",
-            "skill_curriculum",
         ]
         assert all(pair["source_skill_card"] == "skill_sorting" for pair in pairs)
         assert all(0.01 <= pair["weight"] <= 1.0 for pair in pairs)
+        assert all("Retrieved skill:" in pair["instruction"] for pair in pairs)
+        assert all("Task:\n" in pair["instruction"] for pair in pairs)
 
     def test_filters_skill_cards_by_manifest(self):
         from cogmem.config import CogMemConfig
@@ -229,6 +230,8 @@ class TestSkillCardToTrainingPairs:
         assert len(pairs) == 1
         assert pairs[0]["weight"] > 0.6
         assert pairs[0]["skill_confidence"] == 0.9
+        assert "Retrieved skill:" in pairs[0]["instruction"]
+        assert "Task:\nread csv from disk" in pairs[0]["instruction"]
 
 
 class TestSkillCardToCurriculumPair:

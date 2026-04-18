@@ -73,13 +73,20 @@ class CogMemConfig:
 
     # --- Procedural skill cards ---
     skill_min_evidence: int = 3
+    skill_min_distinct_tasks: int = 2
     skill_confidence_threshold: float = 0.6
     skill_min_transfer_gain: float = 0.05
     skill_validation_min_matches: int = 2
     skill_trigger_limit: int = 6
     skill_plan_limit: int = 5
-    skill_curriculum_examples_per_card: int = 1
+    skill_curriculum_examples_per_card: int = 0
     skill_curriculum_include_anti_patterns: bool = True
+    skill_retrieval_top_k: int = 1
+
+    # --- Adapter gating from validated skills ---
+    min_promoted_skills_for_adapter: int = 3
+    min_skill_families_for_adapter: int = 2
+    min_skill_training_pairs_for_adapter: int = 48
 
     # --- Routed adapter memory ---
     adapter_route_min_dev_gain: float = 0.0

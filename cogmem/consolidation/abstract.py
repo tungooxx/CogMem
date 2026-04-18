@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from cogmem.consolidation.select import filter_manifest_eligible
+from cogmem.memory.skill_store import render_skill_card_context
 from cogmem.memory.schema import get_episode_helpfulness
 
 
@@ -29,6 +30,17 @@ def episode_to_training_pair(episode: dict, include_failures: bool = False) -> d
         "success": episode.get("success", False),
         "source_episode": episode["episode_id"],
     }
+
+
+def _task_conditioned_skill_instruction(card: dict, episode: dict) -> str:
+    task_description = episode.get("task_description", "").strip()
+    skill_context = render_skill_card_context(card, include_header=True)
+    return (
+        "Use the retrieved validated skill card only if its activation conditions match the task.\n\n"
+        f"{skill_context}\n\n"
+        "Task:\n"
+        f"{task_description}"
+    )
 
 
 def _skill_card_manifest_eligible(card: dict, config) -> bool:
@@ -161,6 +173,7 @@ def skill_card_to_training_pairs(
                 0.50 * base_weight + 0.30 * confidence + 0.20 * transfer_gain,
             ),
         )
+        pair["instruction"] = _task_conditioned_skill_instruction(card, episode)
         pair["source_skill_card"] = card["skill_id"]
         pair["source_kind"] = "skill_evidence"
         pair["skill_confidence"] = confidence
@@ -179,7 +192,7 @@ def prepare_skill_training_dataset(
     """Build SFT pairs from promoted skill cards, backed by evidence episodes."""
     eligible_episodes = filter_manifest_eligible(episodes, config) if config is not None else list(episodes)
     episodes_by_id = {ep["episode_id"]: ep for ep in eligible_episodes if ep.get("episode_id")}
-    curriculum_examples_per_card = int(getattr(config, "skill_curriculum_examples_per_card", 1) or 0)
+    curriculum_examples_per_card = int(getattr(config, "skill_curriculum_examples_per_card", 0) or 0)
     include_anti_patterns = bool(getattr(config, "skill_curriculum_include_anti_patterns", True))
 
     pairs: list[dict] = []

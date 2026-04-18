@@ -86,6 +86,9 @@ def test_build_skill_cards_validates_and_promotes(tmp_path):
     card = next(iter(store))
     assert card["validation"]["matched_episodes"] >= 1
     assert card["status"] == "promoted"
+    assert card["distinct_task_count"] >= 3
+    assert card["activation_conditions"]
+    assert card["stop_conditions"]
 
 
 def test_validate_skill_card_entrypoint(tmp_path):
@@ -318,3 +321,65 @@ def test_plan_steps_prefer_code_over_reasoning_text():
 
     card = next(card for card in cards if card["task_type"] == "matplotlib:plot")
     assert all(not step.startswith("Thought:") for step in card["plan_steps"])
+    assert all("import matplotlib" not in step.lower() for step in card["plan_steps"])
+    assert any("figure and axes" in step.lower() for step in card["plan_steps"])
+
+
+def test_validate_skill_card_requires_multiple_distinct_tasks_for_promotion(tmp_path):
+    train_episodes = [
+        _episode(
+            "ep_1",
+            "task_shared",
+            "Validate dataframe columns before groupby",
+            success=True,
+            script="import pandas as pd\ndf.groupby('city').sum()",
+            q_value=0.9,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_2",
+            "task_shared",
+            "Validate dataframe columns before aggregation",
+            success=True,
+            script="import pandas as pd\ndf.groupby('team').mean()",
+            q_value=0.85,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_3",
+            "task_shared",
+            "Check dataframe columns before totals",
+            success=True,
+            script="import pandas as pd\ndf.groupby('dept').size()",
+            q_value=0.82,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+    ]
+    dev_episodes = [
+        _episode(
+            "ep_4",
+            "dev1",
+            "Use pandas groupby to inspect dataframe totals",
+            success=True,
+            script="import pandas as pd\ndf.groupby('name').count()",
+            q_value=0.95,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+    ]
+    cfg = CogMemConfig(
+        skill_min_evidence=3,
+        skill_min_distinct_tasks=2,
+        skill_validation_min_matches=1,
+        skill_min_transfer_gain=0.0,
+        skill_confidence_threshold=0.0,
+    )
+
+    store = build_skill_cards(train_episodes, dev_episodes, config=cfg, output_path=str(tmp_path / "skills.json"))
+
+    card = next(iter(store))
+    assert card["distinct_task_count"] == 1
+    assert card["status"] == "candidate"

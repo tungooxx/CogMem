@@ -180,6 +180,41 @@ def run_qstar_cycle(
             "status": "skipped_no_data",
         }
 
+    min_promoted_skills = int(getattr(config, "min_promoted_skills_for_adapter", 1))
+    min_skill_families = int(getattr(config, "min_skill_families_for_adapter", 1))
+    min_skill_pairs = int(getattr(config, "min_skill_training_pairs_for_adapter", 1))
+    if (
+        training_source != "skill_cards"
+        or len(promoted_cards) < min_promoted_skills
+        or len(promoted_families) < min_skill_families
+        or len(skill_training_pairs) < min_skill_pairs
+    ):
+        print(
+            "  Skipping adapter training: "
+            f"source={training_source}, "
+            f"promoted_skills={len(promoted_cards)}/{min_promoted_skills}, "
+            f"families={len(promoted_families)}/{min_skill_families}, "
+            f"skill_pairs={len(skill_training_pairs)}/{min_skill_pairs}"
+        )
+        return {
+            "cycle": cycle,
+            "timestamp": datetime.now().isoformat(),
+            "model": config.active_model_hf,
+            "total_episodes": len(all_episodes),
+            "high_q_episodes": len(selected),
+            "preference_pairs": len(pref_pairs),
+            "generator_path": None,
+            "verifier_path": None,
+            "skill_cards_path": skill_cards_path,
+            "skill_cards_total": skill_summary["total"],
+            "skill_cards_promoted": skill_summary["promoted"],
+            "training_source": training_source,
+            "training_examples": len(skill_training_pairs),
+            "adapter_registry_path": config.adapter_registry_path,
+            "verification": {},
+            "status": "skipped_skill_gate",
+        }
+
     generator_path = train_generator_full(
         selected, pref_dataset, config, cycle=cycle,
         source_skill_card_ids=promoted_skill_ids,

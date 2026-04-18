@@ -51,6 +51,10 @@ def test_run_qstar_cycle_prefers_skill_card_sft_pairs(tmp_path, monkeypatch):
         skill_validation_min_matches=0,
         skill_min_transfer_gain=0.0,
         skill_confidence_threshold=0.0,
+        skill_curriculum_examples_per_card=1,
+        min_promoted_skills_for_adapter=1,
+        min_skill_families_for_adapter=1,
+        min_skill_training_pairs_for_adapter=1,
     )
 
     promoted_card = {
@@ -59,9 +63,14 @@ def test_run_qstar_cycle_prefers_skill_card_sft_pairs(tmp_path, monkeypatch):
         "domain": "filesystem",
         "manifest_ids": ["manifest_a"],
         "evidence_episode_ids": ["ep_2"],
+        "evidence_task_ids": ["task_2"],
+        "distinct_task_count": 1,
         "transfer_gain": 0.8,
         "confidence": 0.9,
         "status": "promoted",
+        "activation_conditions": ["the task matches file IO behavior"],
+        "plan_steps": ["validate the file path before rewriting logic"],
+        "stop_conditions": ["stop if the file is missing entirely"],
     }
 
     monkeypatch.setattr(
@@ -128,6 +137,9 @@ def test_run_qstar_cycle_reuses_existing_skill_store(tmp_path, monkeypatch):
         skill_validation_min_matches=0,
         skill_min_transfer_gain=0.0,
         skill_confidence_threshold=0.0,
+        min_promoted_skills_for_adapter=1,
+        min_skill_families_for_adapter=1,
+        min_skill_training_pairs_for_adapter=1,
     )
 
     skills_path = tmp_path / "prebuilt_skills.json"
@@ -139,6 +151,8 @@ def test_run_qstar_cycle_reuses_existing_skill_store(tmp_path, monkeypatch):
                 "domain": "filesystem",
                 "manifest_ids": ["manifest_a"],
                 "evidence_episode_ids": ["ep_2"],
+                "evidence_task_ids": ["task_2"],
+                "distinct_task_count": 1,
                 "transfer_gain": 0.8,
                 "confidence": 0.9,
                 "status": "promoted",
@@ -186,3 +200,68 @@ def test_run_qstar_cycle_reuses_existing_skill_store(tmp_path, monkeypatch):
     assert results["skill_cards_path"] == str(skills_path)
     assert results["training_source"] == "skill_cards"
     assert captured["kwargs"]["source_skill_card_ids"] == ["skill_prebuilt"]
+
+
+def test_run_qstar_cycle_skips_adapter_when_skill_gate_not_met(tmp_path, monkeypatch):
+    bank_path = tmp_path / "memory_bank.json"
+    MemoryBank(
+        [
+            _episode("ep_1", "task_1", "Plot a chart", helpfulness=0.95),
+            _episode("ep_2", "task_2", "Render a chart", helpfulness=0.92),
+            _episode("ep_3", "task_3", "Visualize a series", helpfulness=0.91),
+        ]
+    ).save(str(bank_path))
+
+    config = CogMemConfig(
+        experiments_dir=str(tmp_path / "experiments"),
+        adapters_dir=str(tmp_path / "adapters"),
+        adapter_registry_path=str(tmp_path / "adapters" / "registry.json"),
+        skills_dir=str(tmp_path / "skills"),
+        logs_dir=str(tmp_path / "logs"),
+        min_holdout=1,
+        q_threshold=0.5,
+        skill_min_evidence=1,
+        skill_validation_min_matches=0,
+        skill_min_transfer_gain=0.0,
+        skill_confidence_threshold=0.0,
+        min_promoted_skills_for_adapter=2,
+        min_skill_families_for_adapter=2,
+        min_skill_training_pairs_for_adapter=4,
+    )
+
+    monkeypatch.setattr(
+        "cogmem.consolidation.pipeline.build_skill_cards",
+        lambda *args, **kwargs: SkillStore(
+            [
+                {
+                    "skill_id": "skill_plot",
+                    "task_type": "matplotlib:plot",
+                    "domain": "matplotlib",
+                    "manifest_ids": ["manifest_a"],
+                    "evidence_episode_ids": ["ep_1"],
+                    "evidence_task_ids": ["task_1"],
+                    "distinct_task_count": 1,
+                    "transfer_gain": 0.8,
+                    "confidence": 0.9,
+                    "status": "promoted",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.pipeline.prepare_preference_dataset",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.train_generator.train_generator_full",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("adapter training should be skipped")),
+    )
+    monkeypatch.setattr(
+        "cogmem.consolidation.train_verifier.train_verifier",
+        lambda *args, **kwargs: None,
+    )
+
+    results = run_qstar_cycle(str(bank_path), config, cycle=0, run_task_fn=None)
+
+    assert results["status"] == "skipped_skill_gate"
+    assert results["generator_path"] is None
