@@ -87,6 +87,18 @@ def _precision_kwargs() -> dict[str, bool]:
     return {"bf16": False, "fp16": True}
 
 
+def _prepare_model_for_adapter_training(model, *, use_kbit: bool):
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    if use_kbit:
+        return prepare_model_for_kbit_training(model)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    return model
+
+
 class _KbitSafeTrainer(Trainer):
     def _move_model_to_device(self, model, device):
         if _uses_kbit_weights(model):
@@ -202,10 +214,7 @@ def train_generator_sft(
         config.active_model_hf,
         bits=config.quantization_bits,
     )
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-    if use_kbit:
-        model = prepare_model_for_kbit_training(model)
+    model = _prepare_model_for_adapter_training(model, use_kbit=use_kbit)
 
     lora_config = _make_lora_config(config, use_dora=config.use_dora)
 
@@ -239,7 +248,7 @@ def train_generator_sft(
             optim="paged_adamw_8bit" if use_kbit else "adamw_torch",
             report_to="none",
             seed=config.seed,
-            gradient_checkpointing=True,
+            gradient_checkpointing=use_kbit,
         ),
         train_dataset=dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
@@ -337,10 +346,7 @@ def train_generator_dpo(
     else:
         model = base_model
 
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-    if use_kbit:
-        model = prepare_model_for_kbit_training(model)
+    model = _prepare_model_for_adapter_training(model, use_kbit=use_kbit)
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -369,7 +375,7 @@ def train_generator_dpo(
         report_to="none",
         max_length=2048,
         max_prompt_length=512,
-        gradient_checkpointing=True,
+        gradient_checkpointing=use_kbit,
     )
 
     trainer = _KbitSafeDPOTrainer(

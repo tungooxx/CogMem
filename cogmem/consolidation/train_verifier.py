@@ -78,6 +78,18 @@ def _precision_kwargs() -> dict[str, bool]:
     return {"bf16": False, "fp16": True}
 
 
+def _prepare_model_for_adapter_training(model, *, use_kbit: bool):
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    if use_kbit:
+        return prepare_model_for_kbit_training(model)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    return model
+
+
 def _resolve_use_dora(requested: bool) -> bool:
     if not requested:
         return False
@@ -110,14 +122,10 @@ def train_verifier(
 
     bits = config.quantization_bits
     model, use_kbit = _load_model_for_training(config.active_model_hf, bits=bits)
-    if hasattr(model, "config"):
-        model.config.use_cache = False
+    model = _prepare_model_for_adapter_training(model, use_kbit=use_kbit)
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    if use_kbit:
-        model = prepare_model_for_kbit_training(model)
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -157,7 +165,7 @@ def train_verifier(
         report_to="none",
         max_length=2048,
         max_prompt_length=512,
-        gradient_checkpointing=True,
+        gradient_checkpointing=use_kbit,
     )
 
     trainer = _KbitSafeDPOTrainer(
