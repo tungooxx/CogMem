@@ -27,13 +27,6 @@ from cogmem.consolidation.abstract import (
 from cogmem.consolidation.adapter_registry import AdapterRegistry
 from cogmem.consolidation.proceduralize import build_skill_cards
 from cogmem.consolidation.select import POLICIES, filter_manifest_eligible
-from cogmem.consolidation.train_generator import train_generator_full
-from cogmem.consolidation.train_verifier import train_verifier
-from cogmem.consolidation.verify import (
-    aggregate_seed_results,
-    run_verification_single_seed,
-    verification_passed,
-)
 from cogmem.memory.memory_bank import MemoryBank
 from cogmem.memory.schema import get_episode_helpfulness
 from cogmem.utils.logging import save_results
@@ -67,6 +60,14 @@ def run_qstar_cycle(
     Returns:
         Dict with adapter paths, training stats, evaluation results.
     """
+    from cogmem.consolidation.train_generator import train_generator_full
+    from cogmem.consolidation.train_verifier import train_verifier
+    from cogmem.consolidation.verify import (
+        aggregate_seed_results,
+        run_verification_single_seed,
+        verification_passed,
+    )
+
     print("=" * 60)
     print(f"Q-STaR CYCLE {cycle}")
     print(f"Model: {config.active_model_hf}")
