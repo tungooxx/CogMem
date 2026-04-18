@@ -82,6 +82,12 @@ class CogMemConfig:
     skill_curriculum_examples_per_card: int = 0
     skill_curriculum_include_anti_patterns: bool = True
     skill_retrieval_top_k: int = 1
+    skill_retrieval_min_score: float = 4.5
+    skill_retrieval_strict_min_score: float = 6.0
+    skill_retrieval_min_promoted_families_for_broad_match: int = 3
+    skill_runtime_disable_min_retrieved: int = 8
+    skill_runtime_disable_min_hurt: int = 3
+    skill_runtime_disable_hurt_rate: float = 0.10
 
     # --- Adapter gating from validated skills ---
     min_promoted_skills_for_adapter: int = 3

@@ -472,33 +472,72 @@ def _stop_condition_risk(card: dict, record_tokens: set[str], error_family: str)
     return min(risk, 1.5)
 
 
-def _skill_match_score(card: dict, record: dict) -> float:
+def _runtime_route_disabled(card: dict, config=None) -> bool:
+    runtime_stats = dict(card.get("runtime_stats", {}) or {})
+    retrieved = int(runtime_stats.get("retrieved", 0) or 0)
+    hurt = int(runtime_stats.get("hurt", 0) or 0)
+    helped = int(runtime_stats.get("helped", 0) or 0)
+    min_retrieved = int(getattr(config, "skill_runtime_disable_min_retrieved", 8))
+    min_hurt = int(getattr(config, "skill_runtime_disable_min_hurt", 3))
+    hurt_rate_threshold = float(getattr(config, "skill_runtime_disable_hurt_rate", 0.10))
+    if retrieved < min_retrieved:
+        return False
+    hurt_rate = hurt / max(retrieved, 1)
+    return helped == 0 and hurt >= min_hurt and hurt_rate >= hurt_rate_threshold
+
+
+def _match_context(card: dict, record: dict) -> dict:
     record_group = _group_key(record)
     record_domain = _episode_domain(record)
     record_feature = _feature_bucket(record, record_domain)
     record_tokens = _episode_hint_tokens(record)
     error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
+    card_feature = _card_feature(card)
+    trigger_tokens = {token.lower() for token in card.get("triggers", []) if token.lower() not in TRIGGER_STOPWORDS}
+    trigger_overlap = record_tokens & trigger_tokens
+    exact_task_match = bool(card.get("task_type") == record_group)
+    domain_match = bool(card.get("domain") == record_domain and record_domain != "general")
+    feature_match = bool(card_feature and card_feature == record_feature)
+    error_match = bool(card.get("error_family") and error_family and error_family == card.get("error_family"))
+    strong_domain_match = domain_match and (feature_match or len(trigger_overlap) >= 2)
+    strong_error_match = error_match and (domain_match or exact_task_match or len(trigger_overlap) >= 2)
+    return {
+        "record_group": record_group,
+        "record_domain": record_domain,
+        "record_feature": record_feature,
+        "record_tokens": record_tokens,
+        "error_family": error_family,
+        "card_feature": card_feature,
+        "trigger_overlap": trigger_overlap,
+        "exact_task_match": exact_task_match,
+        "domain_match": domain_match,
+        "feature_match": feature_match,
+        "error_match": error_match,
+        "strong_domain_match": strong_domain_match,
+        "strong_error_match": strong_error_match,
+    }
+
+
+def _skill_match_score(card: dict, record: dict) -> float:
+    match = _match_context(card, record)
     score = 0.0
 
-    if card.get("task_type") == record_group:
+    if match["exact_task_match"]:
         score += 4.0
-    if card.get("domain") == record_domain and record_domain != "general":
+    if match["domain_match"]:
         score += 2.0
 
-    card_feature = _card_feature(card)
-    if card_feature and card_feature == record_feature:
+    if match["feature_match"]:
         score += 2.0
 
-    trigger_tokens = {token.lower() for token in card.get("triggers", []) if token.lower() not in TRIGGER_STOPWORDS}
-    score += 0.6 * len(record_tokens & trigger_tokens)
+    score += 0.6 * len(match["trigger_overlap"])
 
     activation_text = " ".join(card.get("activation_conditions", []) or []).lower()
     if activation_text:
-        score += 0.25 * sum(1 for token in record_tokens if token in activation_text)
+        score += 0.25 * sum(1 for token in match["record_tokens"] if token in activation_text)
 
-    if card.get("error_family"):
-        if error_family and error_family == card.get("error_family"):
-            score += 1.5
+    if match["error_match"]:
+        score += 1.5
 
     score += 1.5 * max(float(card.get("transfer_gain", 0.0) or 0.0), 0.0)
     score += 0.75 * float(card.get("confidence", 0.0) or 0.0)
@@ -509,9 +548,10 @@ def _skill_match_score(card: dict, record: dict) -> float:
     if retrieved > 0:
         helped = int(runtime_stats.get("helped", 0) or 0)
         hurt = int(runtime_stats.get("hurt", 0) or 0)
-        score += 2.0 * ((helped - hurt) / max(retrieved, 1))
+        score += 3.0 * (helped / max(retrieved, 1))
+        score -= 4.5 * (hurt / max(retrieved, 1))
 
-    score -= _stop_condition_risk(card, record_tokens, error_family)
+    score -= _stop_condition_risk(card, match["record_tokens"], match["error_family"])
     return score
 
 
@@ -521,17 +561,32 @@ def rank_skill_cards_for_record(
     *,
     limit: int = 1,
     promoted_only: bool = True,
+    config=None,
 ) -> list[dict]:
     if isinstance(store, SkillStore):
         cards = list(store.filter(promoted=True)) if promoted_only else list(store)
+        promoted_families = int(store.summary().get("promoted_families", 0) or 0)
     else:
         cards = [normalize_skill_card(card, copy_card=True) for card in store]
         if promoted_only:
             cards = [card for card in cards if card.get("status") == "promoted"]
+        promoted_families = len({card.get("family_key") or card.get("task_type") or card.get("domain") for card in cards})
+    min_score = float(getattr(config, "skill_retrieval_min_score", 4.5))
+    strict_min_score = float(getattr(config, "skill_retrieval_strict_min_score", 6.0))
+    min_families_for_broad_match = int(getattr(config, "skill_retrieval_min_promoted_families_for_broad_match", 3))
+    low_coverage = promoted_families < min_families_for_broad_match
     scored = []
     for card in cards:
+        if _runtime_route_disabled(card, config):
+            continue
+        match = _match_context(card, record)
+        if low_coverage and not (
+            match["exact_task_match"] or match["strong_domain_match"] or match["strong_error_match"]
+        ):
+            continue
         score = _skill_match_score(card, record)
-        if score > 0:
+        required_score = strict_min_score if low_coverage else min_score
+        if score >= required_score:
             scored.append((score, card))
     scored.sort(key=lambda item: (-item[0], -float(item[1].get("confidence", 0.0) or 0.0), item[1]["skill_id"]))
     return [card for _, card in scored[:limit]]
@@ -543,12 +598,14 @@ def rank_skill_cards_for_task(
     *,
     limit: int = 1,
     promoted_only: bool = True,
+    config=None,
 ) -> list[dict]:
     return rank_skill_cards_for_record(
         store,
         task_to_skill_record(task),
         limit=limit,
         promoted_only=promoted_only,
+        config=config,
     )
 
 

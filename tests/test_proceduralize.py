@@ -498,4 +498,76 @@ def test_rank_skill_cards_penalizes_negative_transfer_and_stop_risk():
         promoted_only=True,
     )
 
-    assert [card["skill_id"] for card in ranked] == ["skill_good", "skill_bad"]
+    assert [card["skill_id"] for card in ranked] == ["skill_good"]
+
+
+def test_rank_skill_cards_abstains_when_low_coverage_skill_is_cross_domain():
+    cards = [
+        {
+            "skill_id": "skill_plot",
+            "task_type": "matplotlib:plot",
+            "domain": "matplotlib",
+            "triggers": ["matplotlib", "plot", "axes"],
+            "activation_conditions": ["the task prompt mentions matplotlib plot"],
+            "transfer_gain": 0.6,
+            "confidence": 0.9,
+            "negative_transfer_rate": 0.0,
+            "status": "promoted",
+        }
+    ]
+    cfg = CogMemConfig(
+        skill_retrieval_min_score=4.5,
+        skill_retrieval_strict_min_score=6.0,
+        skill_retrieval_min_promoted_families_for_broad_match=3,
+    )
+
+    ranked = rank_skill_cards_for_task(
+        cards,
+        {
+            "task_id": "task_file",
+            "instruct_prompt": "Read all JSON files from a directory and aggregate counts",
+            "libs": ["json", "pathlib"],
+        },
+        limit=1,
+        promoted_only=True,
+        config=cfg,
+    )
+
+    assert ranked == []
+
+
+def test_rank_skill_cards_disables_harmful_skill_from_runtime_stats():
+    cards = [
+        {
+            "skill_id": "skill_plot",
+            "task_type": "matplotlib:plot",
+            "domain": "matplotlib",
+            "triggers": ["matplotlib", "plot", "axes"],
+            "activation_conditions": ["the task prompt mentions matplotlib plot"],
+            "transfer_gain": 0.6,
+            "confidence": 0.9,
+            "negative_transfer_rate": 0.0,
+            "runtime_stats": {"retrieved": 12, "helped": 0, "hurt": 4},
+            "status": "promoted",
+        }
+    ]
+    cfg = CogMemConfig(
+        skill_retrieval_min_promoted_families_for_broad_match=1,
+        skill_runtime_disable_min_retrieved=8,
+        skill_runtime_disable_min_hurt=3,
+        skill_runtime_disable_hurt_rate=0.10,
+    )
+
+    ranked = rank_skill_cards_for_task(
+        cards,
+        {
+            "task_id": "task_plot",
+            "instruct_prompt": "Plot values with matplotlib",
+            "libs": ["matplotlib"],
+        },
+        limit=1,
+        promoted_only=True,
+        config=cfg,
+    )
+
+    assert ranked == []
