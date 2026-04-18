@@ -430,7 +430,7 @@ def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None
         + 0.10 * card.get("confidence", 0.0)
         - 0.25 * negative_transfer_rate
     )
-    status = "promoted" if (
+    status = "validated" if (
         matched_task_count >= min_matches
         and evidence_task_count >= min_distinct_tasks
         and transfer_gain >= min_transfer_gain
@@ -555,7 +555,7 @@ def _skill_match_score(card: dict, record: dict) -> float:
     return score
 
 
-def rank_skill_cards_for_record(
+def score_skill_cards_for_record(
     store: SkillStore | list[dict],
     record: dict,
     *,
@@ -575,7 +575,7 @@ def rank_skill_cards_for_record(
     strict_min_score = float(getattr(config, "skill_retrieval_strict_min_score", 6.0))
     min_families_for_broad_match = int(getattr(config, "skill_retrieval_min_promoted_families_for_broad_match", 3))
     low_coverage = promoted_families < min_families_for_broad_match
-    scored = []
+    scored: list[tuple[float, dict]] = []
     for card in cards:
         if _runtime_route_disabled(card, config):
             continue
@@ -589,7 +589,27 @@ def rank_skill_cards_for_record(
         if score >= required_score:
             scored.append((score, card))
     scored.sort(key=lambda item: (-item[0], -float(item[1].get("confidence", 0.0) or 0.0), item[1]["skill_id"]))
-    return [card for _, card in scored[:limit]]
+    return scored[:limit]
+
+
+def rank_skill_cards_for_record(
+    store: SkillStore | list[dict],
+    record: dict,
+    *,
+    limit: int = 1,
+    promoted_only: bool = True,
+    config=None,
+) -> list[dict]:
+    return [
+        card
+        for _, card in score_skill_cards_for_record(
+            store,
+            record,
+            limit=limit,
+            promoted_only=promoted_only,
+            config=config,
+        )
+    ]
 
 
 def rank_skill_cards_for_task(

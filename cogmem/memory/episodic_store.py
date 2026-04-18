@@ -8,7 +8,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 
-from cogmem.memory.schema import normalize_episode_metrics
+from cogmem.memory.schema import get_episode_helpfulness, normalize_episode_metrics
 
 
 def infer_error_family(error: str | None) -> str | None:
@@ -62,6 +62,91 @@ def _default_validation_recipe(episode: dict) -> dict:
     return {"kind": "episode_outcome"}
 
 
+def _dedupe_str_list(values) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        text = str(value).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _normalize_runtime_stats(stats: dict | None) -> dict:
+    target = dict(stats or {})
+    target["retrieved"] = int(target.get("retrieved", 0) or 0)
+    target["helped"] = int(target.get("helped", 0) or 0)
+    target["hurt"] = int(target.get("hurt", 0) or 0)
+    target["preserved_success"] = int(target.get("preserved_success", 0) or 0)
+    target["preserved_failure"] = int(target.get("preserved_failure", 0) or 0)
+    target["passed"] = int(target.get("passed", 0) or 0)
+    target["failed"] = int(target.get("failed", 0) or 0)
+    target["domains"] = {str(k): int(v) for k, v in dict(target.get("domains", {}) or {}).items()}
+    target["error_families"] = {str(k): int(v) for k, v in dict(target.get("error_families", {}) or {}).items()}
+    target["task_ids"] = _dedupe_str_list(target.get("task_ids", []))[:20]
+    target["route_breakdown"] = {
+        str(route): _normalize_runtime_stats(route_stats)
+        for route, route_stats in dict(target.get("route_breakdown", {}) or {}).items()
+    }
+    return target
+
+
+def merge_runtime_stats(existing: dict | None, update: dict | None) -> dict:
+    base = _normalize_runtime_stats(existing)
+    incoming = _normalize_runtime_stats(update)
+    merged = dict(base)
+    for key in ["retrieved", "helped", "hurt", "preserved_success", "preserved_failure", "passed", "failed"]:
+        merged[key] = int(base.get(key, 0)) + int(incoming.get(key, 0))
+    domains = dict(base.get("domains", {}) or {})
+    for key, value in dict(incoming.get("domains", {}) or {}).items():
+        domains[str(key)] = int(domains.get(str(key), 0)) + int(value)
+    merged["domains"] = domains
+    error_families = dict(base.get("error_families", {}) or {})
+    for key, value in dict(incoming.get("error_families", {}) or {}).items():
+        error_families[str(key)] = int(error_families.get(str(key), 0)) + int(value)
+    merged["error_families"] = error_families
+    merged["task_ids"] = _dedupe_str_list(list(base.get("task_ids", [])) + list(incoming.get("task_ids", [])))[:20]
+    route_breakdown = dict(base.get("route_breakdown", {}) or {})
+    for route, route_stats in dict(incoming.get("route_breakdown", {}) or {}).items():
+        route_breakdown[str(route)] = merge_runtime_stats(route_breakdown.get(str(route), {}), route_stats)
+    merged["route_breakdown"] = route_breakdown
+    return merged
+
+
+def render_episode_summary_context(episode: dict, *, max_code_lines: int = 8) -> str:
+    task_cue = str(episode.get("task_description", "") or "").strip()
+    error_text = str(episode.get("error", "") or "").strip()
+    libs = [str(lib).strip() for lib in episode.get("libs", []) or [] if str(lib).strip()]
+    code = str(
+        episode.get("final_code")
+        or episode.get("generated_code")
+        or episode.get("script")
+        or ""
+    ).strip()
+    useful_lines = [
+        line.rstrip()
+        for line in code.splitlines()
+        if line.strip() and not line.strip().lower().startswith("thought:")
+    ][:max(max_code_lines, 1)]
+    likely_fix = "Reuse the previously successful pattern before rewriting core logic."
+    if error_text:
+        likely_fix = f"Address the prior failure pattern around {infer_error_family(error_text) or 'the observed error'}."
+    lines = [
+        "Retrieved episodic memory:",
+        f"Task cue: {task_cue[:220]}",
+    ]
+    if error_text:
+        lines.append(f"Observed failure clue: {error_text[:220]}")
+    lines.append(f"Likely fix pattern: {likely_fix}")
+    if libs:
+        lines.append(f"Key imports/APIs: {', '.join(libs[:5])}")
+    if useful_lines:
+        lines.append("Corrected code excerpt:")
+        lines.append("```python")
+        lines.extend(useful_lines)
+        lines.append("```")
+    return "\n".join(lines)
+
+
 def normalize_episode_record(
     episode: dict,
     *,
@@ -88,6 +173,7 @@ def normalize_episode_record(
         target["validation_recipe"] = _default_validation_recipe(target)
     if not target.get("source_benchmark"):
         target["source_benchmark"] = "unknown"
+    target["runtime_stats"] = _normalize_runtime_stats(target.get("runtime_stats", {}))
     return target
 
 
@@ -171,6 +257,23 @@ class EpisodicStore:
 
     def get(self, episode_id: str) -> dict | None:
         return self._index.get(episode_id)
+
+    def apply_runtime_utility(self, utility_by_episode: dict[str, dict], *, route_name: str | None = None) -> int:
+        updated = 0
+        for episode_id, utility in dict(utility_by_episode or {}).items():
+            episode = self._index.get(episode_id)
+            if episode is None:
+                continue
+            utility_stats = _normalize_runtime_stats(utility)
+            if route_name:
+                route_stats = dict(utility_stats)
+                route_stats["route_breakdown"] = {}
+                utility_stats = dict(utility_stats)
+                utility_stats["route_breakdown"] = {str(route_name): route_stats}
+            merged = merge_runtime_stats(episode.get("runtime_stats", {}), utility_stats)
+            self.update(episode_id, runtime_stats=merged)
+            updated += 1
+        return updated
 
     def filter(
         self,

@@ -126,8 +126,9 @@ def run_qstar_cycle(
         }
     )
     print(
-        f"  Skill cards: {skill_summary['total']} candidates, "
-        f"{skill_summary['promoted']} promoted"
+        f"  Skill cards: total={skill_summary['total']}, "
+        f"validated={skill_summary.get('validated', 0)}, "
+        f"promoted={skill_summary['promoted']}"
     )
 
     # 2. Build preference pairs (from available episodes only)
@@ -143,25 +144,17 @@ def run_qstar_cycle(
         available_episodes,
         config=config,
     )
-    training_source = "skill_cards" if skill_training_pairs else "episodes"
-    training_manifest_ids = (
-        promoted_manifest_ids
-        if skill_training_pairs else
-        sorted({ep.get("manifest_id") for ep in selected if ep.get("manifest_id")})
-    )
-    training_families = (
-        promoted_families
-        if skill_training_pairs else
-        sorted({ep.get("task_type") for ep in selected if ep.get("task_type")})
-    )
+    training_source = "skill_cards"
+    training_manifest_ids = promoted_manifest_ids
+    training_families = promoted_families
 
     # 3. Train generator (SFT then DPO)
     print(f"\n{'=' * 60}")
     print("STEP 3: Train Generator DoRA (SFT -> DPO)")
     print("=" * 60)
 
-    if not selected and not skill_training_pairs:
-        print("  No high-Q episodes available. Skipping training.")
+    if not skill_training_pairs:
+        print("  No promoted skill-card training data available. Skipping training.")
         return {
             "cycle": cycle,
             "timestamp": datetime.now().isoformat(),
@@ -177,15 +170,14 @@ def run_qstar_cycle(
             "training_source": training_source,
             "training_examples": 0,
             "verification": {},
-            "status": "skipped_no_data",
+            "status": "skipped_skill_gate",
         }
 
     min_promoted_skills = int(getattr(config, "min_promoted_skills_for_adapter", 1))
     min_skill_families = int(getattr(config, "min_skill_families_for_adapter", 1))
     min_skill_pairs = int(getattr(config, "min_skill_training_pairs_for_adapter", 1))
     if (
-        training_source != "skill_cards"
-        or len(promoted_cards) < min_promoted_skills
+        len(promoted_cards) < min_promoted_skills
         or len(promoted_families) < min_skill_families
         or len(skill_training_pairs) < min_skill_pairs
     ):

@@ -119,7 +119,10 @@ def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target[RETRIEVAL_CONFIDENCE_KEY] = confidence
     target["negative_transfer_rate"] = negative_transfer_rate
     target[NEGATIVE_TRANSFER_RATE_KEY] = negative_transfer_rate
-    target["status"] = str(target.get("status", "candidate") or "candidate")
+    status = str(target.get("status", "candidate") or "candidate")
+    if status not in {"candidate", "validated", "promoted"}:
+        status = "candidate"
+    target["status"] = status
     return target
 
 
@@ -243,22 +246,30 @@ class SkillStore:
         if status is not None:
             results = [card for card in results if card.get("status") == status]
         if promoted is not None:
-            expected = "promoted" if promoted else "candidate"
-            results = [card for card in results if card.get("status") == expected]
+            if promoted:
+                results = [card for card in results if card.get("status") == "promoted"]
+            else:
+                results = [card for card in results if card.get("status") != "promoted"]
         return results
 
     def summary(self) -> dict:
         if not self._cards:
             return {
                 "total": 0,
+                "candidate": 0,
+                "validated": 0,
                 "promoted": 0,
                 "mean_confidence": 0.0,
                 "mean_transfer_gain": 0.0,
                 "promoted_families": 0,
             }
         promoted = self.filter(promoted=True)
+        candidate = self.filter(status="candidate")
+        validated = self.filter(status="validated")
         return {
             "total": len(self._cards),
+            "candidate": len(candidate),
+            "validated": len(validated),
             "promoted": len(promoted),
             "mean_confidence": sum(card["confidence"] for card in self._cards) / len(self._cards),
             "mean_transfer_gain": sum(card["transfer_gain"] for card in self._cards) / len(self._cards),

@@ -88,6 +88,15 @@ class CogMemConfig:
     skill_runtime_disable_min_retrieved: int = 8
     skill_runtime_disable_min_hurt: int = 3
     skill_runtime_disable_hurt_rate: float = 0.10
+    episode_summary_max_code_lines: int = 8
+    episode_retrieval_min_score: float = 7.0
+    episode_retrieval_retry_min_score: float = 5.5
+    episode_runtime_disable_min_retrieved: int = 8
+    episode_runtime_disable_min_hurt: int = 3
+    episode_runtime_disable_hurt_rate: float = 0.10
+    skill_route_promotion_min_tasks: int = 2
+    skill_route_promotion_min_delta_passed: int = 1
+    skill_route_promotion_max_regression_rate: float = 0.10
 
     # --- Adapter gating from validated skills ---
     min_promoted_skills_for_adapter: int = 3

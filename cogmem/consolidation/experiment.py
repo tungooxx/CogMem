@@ -10,6 +10,7 @@ embedding collection and consolidation logic inline.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections import Counter
@@ -37,14 +38,20 @@ from cogmem.consolidation.abstract import (
     prepare_skill_training_dataset,
 )
 from cogmem.consolidation.proceduralize import (
+    _episode_domain,
+    _episode_hint_tokens,
+    _feature_bucket,
+    _group_key,
     build_skill_cards,
     rank_skill_cards_for_record,
     rank_skill_cards_for_task,
+    score_skill_cards_for_record,
     task_to_skill_record,
 )
 from cogmem.consolidation.select import filter_manifest_eligible
-from cogmem.memory.episodic_store import infer_error_family
+from cogmem.memory.episodic_store import EpisodicStore, infer_error_family, render_episode_summary_context
 from cogmem.memory.memory_bank import MemoryBank
+from cogmem.memory.schema import get_episode_helpfulness
 from cogmem.memory.skill_store import SkillStore, render_skill_card_context
 
 
@@ -260,40 +267,235 @@ def _augment_messages_with_skill_cards(messages: list[dict], skill_cards: list[d
     return augmented
 
 
-def _rerank_retry_skill_cards(
-    task: dict,
-    skill_store: SkillStore,
-    *,
-    previous_skill_ids: list[str],
-    error_text: str,
-    skill_top_k: int,
-) -> list[dict]:
-    retry_record = task_to_skill_record(task)
-    retry_record["error"] = error_text
-    retry_record["error_family"] = infer_error_family(error_text)
-    if error_text:
-        retry_record["task_description"] = (
-            f"{retry_record.get('task_description', '')}\n\nObserved failure:\n{error_text[:500]}"
-        ).strip()
-    reranked = rank_skill_cards_for_record(
-        skill_store,
-        retry_record,
-        limit=max(skill_top_k + len(previous_skill_ids), skill_top_k),
-        promoted_only=True,
+def _augment_messages_with_episode_summary(messages: list[dict], episode_summary: str) -> list[dict]:
+    if not episode_summary:
+        return messages
+    augmented = [dict(message) for message in messages]
+    augmented[0]["content"] = (
+        augmented[0]["content"]
+        + "\n\nWhen the retrieved episodic memory is relevant, use it as a compact debugging hint."
+        + " Reuse the pattern, but still solve the current task directly."
     )
-    preferred = [card for card in reranked if card["skill_id"] not in set(previous_skill_ids)]
-    if preferred:
-        return preferred[:skill_top_k]
-    return reranked[:skill_top_k]
+    augmented[1]["content"] = f"{episode_summary}\n\nTask:\n{augmented[1]['content']}"
+    return augmented
 
 
-def _run_task_with_skill_cards(
+def _augment_messages_with_memory_route(
+    messages: list[dict],
+    *,
+    skill_cards: list[dict] | None = None,
+    episode_summary: str | None = None,
+) -> list[dict]:
+    augmented = [dict(message) for message in messages]
+    if skill_cards:
+        augmented = _augment_messages_with_skill_cards(augmented, skill_cards)
+    if episode_summary:
+        augmented = _augment_messages_with_episode_summary(augmented, episode_summary)
+    return augmented
+
+
+def _task_prompt_hash(task_description: str) -> str | None:
+    text = str(task_description or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _episode_route_disabled(episode: dict, config: CogMemConfig | None = None) -> bool:
+    runtime_stats = dict(episode.get("runtime_stats", {}) or {})
+    retrieved = int(runtime_stats.get("retrieved", 0) or 0)
+    hurt = int(runtime_stats.get("hurt", 0) or 0)
+    helped = int(runtime_stats.get("helped", 0) or 0)
+    min_retrieved = int(getattr(config, "episode_runtime_disable_min_retrieved", 8))
+    min_hurt = int(getattr(config, "episode_runtime_disable_min_hurt", 3))
+    hurt_rate_threshold = float(getattr(config, "episode_runtime_disable_hurt_rate", 0.10))
+    if retrieved < min_retrieved:
+        return False
+    hurt_rate = hurt / max(retrieved, 1)
+    return helped == 0 and hurt >= min_hurt and hurt_rate >= hurt_rate_threshold
+
+
+def _score_episode_summaries_for_record(
+    store: EpisodicStore | list[dict],
+    record: dict,
+    *,
+    limit: int = 1,
+    config: CogMemConfig | None = None,
+    retry: bool = False,
+    exclude_episode_ids: set[str] | None = None,
+) -> list[tuple[float, dict]]:
+    episodes = list(store) if isinstance(store, EpisodicStore) else list(store)
+    record_group = _group_key(record)
+    record_domain = _episode_domain(record)
+    record_feature = _feature_bucket(record, record_domain)
+    record_tokens = _episode_hint_tokens(record)
+    error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
+    record_prompt_hash = _task_prompt_hash(record.get("task_description", ""))
+    required_score = float(
+        getattr(
+            config,
+            "episode_retrieval_retry_min_score" if retry else "episode_retrieval_min_score",
+            5.5 if retry else 7.0,
+        )
+    )
+    excluded = set(exclude_episode_ids or set())
+    scored: list[tuple[float, dict]] = []
+    for episode in episodes:
+        if not episode.get("success"):
+            continue
+        if episode.get("episode_id") in excluded:
+            continue
+        if _episode_route_disabled(episode, config):
+            continue
+        episode_group = _group_key(episode)
+        episode_domain = _episode_domain(episode)
+        episode_feature = _feature_bucket(episode, episode_domain)
+        episode_tokens = _episode_hint_tokens(episode)
+        trigger_overlap = record_tokens & episode_tokens
+        episode_error_family = str(episode.get("error_family") or infer_error_family(episode.get("error")) or "")
+        score = 0.0
+        if episode_group == record_group:
+            score += 3.5
+        if episode_domain == record_domain and record_domain != "general":
+            score += 2.0
+        if episode_feature and episode_feature == record_feature:
+            score += 1.5
+        if record_prompt_hash and episode.get("prompt_hash") and episode.get("prompt_hash") == record_prompt_hash:
+            score += 3.0
+        if error_family and episode_error_family and error_family == episode_error_family:
+            score += 1.5
+        score += 0.5 * len(trigger_overlap)
+        score += 2.0 * max(get_episode_helpfulness(episode, 0.0), 0.0)
+        runtime_stats = dict(episode.get("runtime_stats", {}) or {})
+        retrieved = int(runtime_stats.get("retrieved", 0) or 0)
+        if retrieved > 0:
+            helped = int(runtime_stats.get("helped", 0) or 0)
+            hurt = int(runtime_stats.get("hurt", 0) or 0)
+            score += 3.0 * (helped / max(retrieved, 1))
+            score -= 4.5 * (hurt / max(retrieved, 1))
+        if score >= required_score:
+            scored.append((score, episode))
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            -float(get_episode_helpfulness(item[1], 0.0)),
+            item[1].get("episode_id", ""),
+        )
+    )
+    return scored[:limit]
+
+
+def _route_record_for_task(task: dict, *, error_text: str | None = None) -> dict:
+    record = task_to_skill_record(task)
+    record["task_id"] = task.get("task_id")
+    record["prompt_hash"] = _task_prompt_hash(record.get("task_description", ""))
+    if error_text:
+        record["error"] = error_text
+        record["error_family"] = infer_error_family(error_text)
+        record["task_description"] = (
+            f"{record.get('task_description', '')}\n\nObserved failure:\n{str(error_text)[:500]}"
+        ).strip()
+    return record
+
+
+def select_runtime_route(
+    task: dict,
+    *,
+    route_mode: str = "router",
+    skill_store: SkillStore | None = None,
+    episode_store: EpisodicStore | None = None,
+    skill_top_k: int = 1,
+    config: CogMemConfig | None = None,
+    error_text: str | None = None,
+    previous_route_history: list[dict] | None = None,
+    initial_skill_cards: list[dict] | None = None,
+    initial_episode: dict | None = None,
+) -> dict[str, Any]:
+    record = _route_record_for_task(task, error_text=error_text)
+    seen_skill_ids = {
+        skill_id
+        for item in list(previous_route_history or [])
+        for skill_id in list(item.get("skill_ids", []) or [])
+    }
+    seen_episode_ids = {
+        str(item.get("episode_id"))
+        for item in list(previous_route_history or [])
+        if item.get("episode_id")
+    }
+    if error_text:
+        initial_skill_cards = None
+        initial_episode = None
+
+    if initial_skill_cards is not None and route_mode in {"skill", "router"}:
+        skill_scored = [(float("inf"), card) for card in initial_skill_cards[:skill_top_k]]
+    elif skill_store is not None and route_mode in {"skill", "router"}:
+        skill_scored = [
+            (score, card)
+            for score, card in score_skill_cards_for_record(
+                skill_store,
+                record,
+                limit=max(skill_top_k + len(seen_skill_ids), skill_top_k),
+                promoted_only=True,
+                config=config,
+            )
+            if card.get("skill_id") not in seen_skill_ids
+        ][:skill_top_k]
+    else:
+        skill_scored = []
+
+    if initial_episode is not None and route_mode in {"episode", "router"}:
+        episode_scored = [(float("inf"), initial_episode)]
+    elif episode_store is not None and route_mode in {"episode", "router"}:
+        episode_scored = _score_episode_summaries_for_record(
+            episode_store,
+            record,
+            limit=1,
+            config=config,
+            retry=bool(error_text),
+            exclude_episode_ids=seen_episode_ids if error_text else None,
+        )
+    else:
+        episode_scored = []
+
+    route_scores = {
+        "skill": skill_scored[0][0] if skill_scored else None,
+        "episode_summary": episode_scored[0][0] if episode_scored else None,
+    }
+    candidates: list[tuple[str, float]] = []
+    if skill_scored:
+        candidates.append(("skill", float(skill_scored[0][0])))
+    if episode_scored:
+        candidates.append(("episode_summary", float(episode_scored[0][0])))
+    candidates.sort(key=lambda item: (-item[1], item[0]))
+    if not candidates:
+        return {
+            "selected_route": "none",
+            "skill_cards": [],
+            "episode": None,
+            "route_scores": route_scores,
+            "abstain_reason": "no_candidate_above_threshold",
+        }
+    selected_route = candidates[0][0]
+    return {
+        "selected_route": selected_route,
+        "skill_cards": [card for _, card in skill_scored] if selected_route == "skill" else [],
+        "episode": episode_scored[0][1] if selected_route == "episode_summary" else None,
+        "route_scores": route_scores,
+        "abstain_reason": None,
+    }
+
+
+def _run_task_with_memory_route(
     task: dict,
     llm_client,
     *,
-    retrieved_skill_cards: list[dict],
+    route_mode: str = "router",
+    initial_skill_cards: list[dict] | None = None,
+    initial_episode: dict | None = None,
     skill_store: SkillStore | None = None,
+    episode_store: EpisodicStore | None = None,
     skill_top_k: int = 1,
+    config: CogMemConfig | None = None,
     eval_mode: str = "subprocess",
     eval_timeout: int = 30,
     max_tokens: int = 2048,
@@ -301,39 +503,58 @@ def _run_task_with_skill_cards(
     max_attempts: int = 1,
 ) -> dict:
     trajectory = []
-    retrieved_skill_history: list[list[str]] = []
-    current_skill_cards = list(retrieved_skill_cards)
+    retrieved_route_history: list[dict[str, Any]] = []
+    current_skill_cards = list(initial_skill_cards or [])
+    current_episode = initial_episode
 
     for attempt in range(1, max_attempts + 1):
+        prev_error = trajectory[-1].get("error", "Unknown error") if attempt > 1 else None
+        route_selection = select_runtime_route(
+            task,
+            route_mode=route_mode,
+            skill_store=skill_store,
+            episode_store=episode_store,
+            skill_top_k=skill_top_k,
+            config=config,
+            error_text=prev_error,
+            previous_route_history=retrieved_route_history,
+            initial_skill_cards=current_skill_cards if attempt == 1 else None,
+            initial_episode=current_episode if attempt == 1 else None,
+        )
+        selected_route = route_selection["selected_route"]
+        current_skill_cards = list(route_selection.get("skill_cards", []) or [])
+        current_episode = route_selection.get("episode")
+        route_entry = {
+            "attempt": attempt,
+            "selected_route": selected_route,
+            "skill_ids": [card["skill_id"] for card in current_skill_cards],
+            "episode_id": current_episode.get("episode_id") if current_episode else None,
+            "route_scores": dict(route_selection.get("route_scores", {}) or {}),
+            "abstain_reason": route_selection.get("abstain_reason"),
+        }
+        retrieved_route_history.append(route_entry)
+
         if attempt > 1:
-            prev_error = trajectory[-1].get("error", "Unknown error")
-            if skill_store is not None:
-                reranked = _rerank_retry_skill_cards(
-                    task,
-                    skill_store,
-                    previous_skill_ids=[
-                        skill_id
-                        for history in retrieved_skill_history
-                        for skill_id in history
-                    ],
-                    error_text=prev_error,
-                    skill_top_k=skill_top_k,
-                )
-                if reranked:
-                    current_skill_cards = reranked
             retry_prompt = (
                 f"Your previous attempt failed with this error:\n"
                 f"{prev_error[:500]}\n\n"
                 f"Please fix the code and try again."
             )
 
-        messages = _augment_messages_with_skill_cards(
+        episode_summary = (
+            render_episode_summary_context(
+                current_episode,
+                max_code_lines=int(getattr(config, "episode_summary_max_code_lines", 8)),
+            )
+            if current_episode is not None else None
+        )
+        messages = _augment_messages_with_memory_route(
             format_messages(task, use_instruct=True),
-            current_skill_cards,
+            skill_cards=current_skill_cards,
+            episode_summary=episode_summary,
         )
         if attempt > 1:
             messages.append({"role": "user", "content": retry_prompt})
-        retrieved_skill_history.append([card["skill_id"] for card in current_skill_cards])
 
         try:
             response = llm_client.chat(
@@ -374,9 +595,56 @@ def _run_task_with_skill_cards(
         "success": success,
         "num_attempts": len(trajectory),
         "error": trajectory[-1].get("error") if trajectory else None,
-        "retrieved_skill_ids": list(dict.fromkeys(skill_id for history in retrieved_skill_history for skill_id in history)),
-        "retrieved_skill_history": retrieved_skill_history,
+        "selected_route": retrieved_route_history[-1]["selected_route"] if retrieved_route_history else "none",
+        "abstained": route_mode != "none" and all(item.get("selected_route") == "none" for item in retrieved_route_history),
+        "retrieved_skill_ids": list(
+            dict.fromkeys(
+                skill_id
+                for item in retrieved_route_history
+                for skill_id in list(item.get("skill_ids", []) or [])
+            )
+        ),
+        "retrieved_skill_history": [list(item.get("skill_ids", []) or []) for item in retrieved_route_history],
+        "retrieved_episode_id": next(
+            (
+                item.get("episode_id")
+                for item in reversed(retrieved_route_history)
+                if item.get("episode_id")
+            ),
+            None,
+        ),
+        "retrieved_route_history": retrieved_route_history,
     }
+
+
+def _run_task_with_skill_cards(
+    task: dict,
+    llm_client,
+    *,
+    retrieved_skill_cards: list[dict],
+    skill_store: SkillStore | None = None,
+    skill_top_k: int = 1,
+    config: CogMemConfig | None = None,
+    eval_mode: str = "subprocess",
+    eval_timeout: int = 30,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 1,
+) -> dict:
+    return _run_task_with_memory_route(
+        task,
+        llm_client,
+        route_mode="skill",
+        initial_skill_cards=retrieved_skill_cards,
+        skill_store=skill_store,
+        skill_top_k=skill_top_k,
+        config=config,
+        eval_mode=eval_mode,
+        eval_timeout=eval_timeout,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        max_attempts=max_attempts,
+    )
 
 
 def evaluate_new_arch_model(
@@ -385,6 +653,10 @@ def evaluate_new_arch_model(
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
     adapter_path: str | None = None,
     skill_cards_path: str | None = None,
+    skill_store: SkillStore | None = None,
+    episode_memory_path: str | None = None,
+    episode_store: EpisodicStore | None = None,
+    route_mode: str = "none",
     skill_top_k: int = 1,
     config: CogMemConfig | None = None,
     task_limit: int | None = None,
@@ -399,8 +671,18 @@ def evaluate_new_arch_model(
     rows: list[dict[str, Any]] = []
     passed = 0
     start_time = time.time()
-    skill_store = SkillStore.load(skill_cards_path) if skill_cards_path else None
+    if skill_store is None and skill_cards_path:
+        skill_store = SkillStore.load(skill_cards_path)
+    if episode_store is None and episode_memory_path:
+        loaded_episode_store = EpisodicStore.load(episode_memory_path)
+        episode_store = (
+            EpisodicStore(filter_manifest_eligible(list(loaded_episode_store), config))
+            if config is not None else loaded_episode_store
+        )
     selected_skill_ids: Counter[str] = Counter()
+    selected_episode_ids: Counter[str] = Counter()
+    selected_route_counts: Counter[str] = Counter()
+    abstain_count = 0
 
     try:
         model, tokenizer, llm_client = load_new_arch_runtime(
@@ -409,45 +691,32 @@ def evaluate_new_arch_model(
         )
 
         for idx, task in enumerate(tasks):
-            retrieved_skill_cards = (
-                rank_skill_cards_for_task(
-                    skill_store,
-                    task,
-                    limit=skill_top_k,
-                    promoted_only=True,
-                    config=config,
-                )
-                if skill_store is not None
-                else []
+            episode = _run_task_with_memory_route(
+                task,
+                llm_client,
+                route_mode=route_mode,
+                skill_store=skill_store,
+                episode_store=episode_store,
+                skill_top_k=skill_top_k,
+                config=config,
+                eval_mode="subprocess",
+                eval_timeout=eval_timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                max_attempts=max_attempts,
             )
-            if retrieved_skill_cards:
-                episode = _run_task_with_skill_cards(
-                    task,
-                    llm_client,
-                    retrieved_skill_cards=retrieved_skill_cards,
-                    skill_store=skill_store,
-                    skill_top_k=skill_top_k,
-                    eval_mode="subprocess",
-                    eval_timeout=eval_timeout,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    max_attempts=max_attempts,
-                )
-            else:
-                episode = run_single_task(
-                    task,
-                    llm_client,
-                    eval_mode="subprocess",
-                    eval_timeout=eval_timeout,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    max_attempts=max_attempts,
-                )
             success = bool(episode.get("success"))
             if success:
                 passed += 1
+            selected_route = str(episode.get("selected_route", "none") or "none")
+            selected_route_counts[selected_route] += 1
+            if route_mode != "none" and bool(episode.get("abstained")):
+                abstain_count += 1
             for skill_id in episode.get("retrieved_skill_ids", []) or []:
                 selected_skill_ids[skill_id] += 1
+            retrieved_episode_id = episode.get("retrieved_episode_id")
+            if retrieved_episode_id:
+                selected_episode_ids[str(retrieved_episode_id)] += 1
 
             rows.append(
                 {
@@ -455,8 +724,12 @@ def evaluate_new_arch_model(
                     "passed": success,
                     "attempts": int(episode.get("num_attempts", 0) or 0),
                     "error": episode.get("error"),
+                    "selected_route": selected_route,
+                    "abstained": bool(episode.get("abstained")),
                     "retrieved_skill_ids": list(episode.get("retrieved_skill_ids", []) or []),
+                    "retrieved_episode_id": retrieved_episode_id,
                     "retrieved_skill_history": list(episode.get("retrieved_skill_history", []) or []),
+                    "retrieved_route_history": list(episode.get("retrieved_route_history", []) or []),
                 }
             )
 
@@ -464,8 +737,12 @@ def evaluate_new_arch_model(
                 elapsed = time.time() - start_time
                 rate = (idx + 1) / elapsed * 3600 if elapsed > 0 else 0.0
                 label_parts = ["adapter" if adapter_path else "base"]
-                if skill_store is not None:
+                if route_mode == "skill" and skill_store is not None:
                     label_parts.append("skill")
+                elif route_mode == "episode" and episode_store is not None:
+                    label_parts.append("episode")
+                elif route_mode == "router" and (skill_store is not None or episode_store is not None):
+                    label_parts.append("router")
                 label = "+".join(label_parts)
                 print(
                     "[{}/{}] {} | {}={} | pass_rate={:.1%} | {:.0f}/hr".format(
@@ -488,8 +765,13 @@ def evaluate_new_arch_model(
         "passed": passed,
         "pass_rate": passed / task_count if task_count else 0.0,
         "elapsed_minutes": (time.time() - start_time) / 60.0,
+        "route_mode": route_mode,
         "skill_cards_path": skill_cards_path,
+        "episode_memory_path": episode_memory_path,
         "selected_skill_ids": dict(selected_skill_ids),
+        "selected_episode_ids": dict(selected_episode_ids),
+        "selected_route_counts": dict(selected_route_counts),
+        "abstain_count": abstain_count,
         "rows": rows,
     }
 
@@ -503,6 +785,18 @@ def _task_domain_label(task: dict) -> str:
         if domain in description:
             return "file_io" if domain in {"glob", "pathlib", "json", "csv"} else domain
     return "general"
+
+
+def _episode_to_eval_task(episode: dict) -> dict[str, Any]:
+    return {
+        "task_id": episode.get("task_id"),
+        "instruct_prompt": episode.get("task_description", "") or "",
+        "complete_prompt": episode.get("task_description", "") or "",
+        "entry_point": episode.get("entry_point", "") or "",
+        "libs": list(episode.get("libs", []) or []),
+        "task_type": episode.get("task_type", "bigcodebench") or "bigcodebench",
+        "error": episode.get("error"),
+    }
 
 
 def _build_skill_utility(
@@ -573,6 +867,73 @@ def _build_skill_utility(
     return summarized
 
 
+def _build_episode_utility(
+    tasks: list[dict],
+    baseline_rows: dict[str, dict[str, Any]],
+    routed_rows: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    utility: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = task["task_id"]
+        routed = routed_rows.get(task_id, {})
+        episode_id = routed.get("retrieved_episode_id")
+        if not episode_id:
+            continue
+        baseline = baseline_rows.get(task_id, {})
+        routed_pass = bool(routed.get("passed"))
+        baseline_pass = bool(baseline.get("passed"))
+        error_family = infer_error_family(routed.get("error"))
+        domain = _task_domain_label(task)
+        stats = utility.setdefault(
+            str(episode_id),
+            {
+                "retrieved": 0,
+                "helped": 0,
+                "hurt": 0,
+                "preserved_success": 0,
+                "preserved_failure": 0,
+                "passed": 0,
+                "failed": 0,
+                "domains": Counter(),
+                "error_families": Counter(),
+                "task_ids": [],
+            },
+        )
+        stats["retrieved"] += 1
+        stats["passed"] += int(routed_pass)
+        stats["failed"] += int(not routed_pass)
+        if routed_pass and not baseline_pass:
+            stats["helped"] += 1
+        elif baseline_pass and not routed_pass:
+            stats["hurt"] += 1
+        elif routed_pass and baseline_pass:
+            stats["preserved_success"] += 1
+        else:
+            stats["preserved_failure"] += 1
+        stats["domains"][domain] += 1
+        if error_family:
+            stats["error_families"][error_family] += 1
+        if task_id not in stats["task_ids"]:
+            stats["task_ids"].append(task_id)
+
+    summarized: dict[str, dict[str, Any]] = {}
+    for episode_id, stats in utility.items():
+        retrieved = max(int(stats["retrieved"]), 1)
+        summarized[episode_id] = {
+            "retrieved": int(stats["retrieved"]),
+            "helped": int(stats["helped"]),
+            "hurt": int(stats["hurt"]),
+            "help_rate": int(stats["helped"]) / retrieved,
+            "hurt_rate": int(stats["hurt"]) / retrieved,
+            "passed": int(stats["passed"]),
+            "failed": int(stats["failed"]),
+            "domains": dict(stats["domains"]),
+            "error_families": dict(stats["error_families"]),
+            "task_ids": stats["task_ids"][:10],
+        }
+    return summarized
+
+
 def _compare_route_results(
     tasks: list[dict],
     baseline_eval: dict[str, Any],
@@ -598,29 +959,57 @@ def _compare_route_results(
         "improved_task_ids": improved,
         "regressed_task_ids": regressed,
         "regression_rate": len(regressed) / task_count,
+        "selected_route_counts": dict(candidate_eval.get("selected_route_counts", {}) or {}),
+        "abstain_count": int(candidate_eval.get("abstain_count", 0) or 0),
         "skill_utility": _build_skill_utility(tasks, baseline_rows, candidate_rows),
+        "episode_utility": _build_episode_utility(tasks, baseline_rows, candidate_rows),
     }
 
 
-def persist_route_skill_utility(skill_cards_path: str | None, comparisons: dict[str, Any]) -> dict[str, Any]:
-    if not skill_cards_path:
-        return {"skills_path": None, "updated_skills": 0, "updated_routes": []}
-    store = SkillStore.load(skill_cards_path)
+def persist_route_memory_utility(
+    skill_cards_path: str | None,
+    memory_bank_path: str | None,
+    comparisons: dict[str, Any],
+) -> dict[str, Any]:
     updated_routes: list[str] = []
     updated_skills = 0
-    for route_name, route_result in dict(comparisons or {}).items():
-        skill_utility = dict(route_result.get("skill_utility", {}) or {})
-        if not skill_utility:
-            continue
-        updated_skills += store.apply_runtime_utility(skill_utility, route_name=route_name)
-        updated_routes.append(route_name)
-    if updated_routes:
-        store.save(skill_cards_path)
+    updated_episodes = 0
+    if skill_cards_path:
+        store = SkillStore.load(skill_cards_path)
+        for route_name, route_result in dict(comparisons or {}).items():
+            skill_utility = dict(route_result.get("skill_utility", {}) or {})
+            if not skill_utility:
+                continue
+            updated_skills += store.apply_runtime_utility(skill_utility, route_name=route_name)
+            updated_routes.append(route_name)
+        if updated_skills:
+            store.save(skill_cards_path)
+    if memory_bank_path:
+        store = EpisodicStore.load(memory_bank_path)
+        for route_name, route_result in dict(comparisons or {}).items():
+            episode_utility = dict(route_result.get("episode_utility", {}) or {})
+            if not episode_utility:
+                continue
+            updated_episodes += store.apply_runtime_utility(episode_utility, route_name=route_name)
+            if route_name not in updated_routes:
+                updated_routes.append(route_name)
+        if updated_episodes:
+            store.save(memory_bank_path)
     return {
         "skills_path": skill_cards_path,
+        "memory_bank_path": memory_bank_path,
         "updated_skills": updated_skills,
+        "updated_episodes": updated_episodes,
         "updated_routes": updated_routes,
     }
+
+
+def persist_route_skill_utility(
+    skill_cards_path: str | None,
+    comparisons: dict[str, Any],
+    memory_bank_path: str | None = None,
+) -> dict[str, Any]:
+    return persist_route_memory_utility(skill_cards_path, memory_bank_path, comparisons)
 
 
 def compare_new_arch_base_vs_adapter(
@@ -641,6 +1030,7 @@ def compare_new_arch_base_vs_adapter(
         model_name=model_name,
         adapter_path=adapter_path,
         skill_cards_path=None,
+        episode_memory_path=None,
         config=config,
         task_limit=task_limit,
         max_tokens=max_tokens,
@@ -667,6 +1057,9 @@ def compare_new_arch_routes(
     *,
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
     skill_cards_path: str | None = None,
+    skill_store: SkillStore | None = None,
+    episode_memory_path: str | None = None,
+    episode_store: EpisodicStore | None = None,
     adapter_path: str | None = None,
     skill_top_k: int = 1,
     config: CogMemConfig | None = None,
@@ -685,6 +1078,8 @@ def compare_new_arch_routes(
         model_name=model_name,
         adapter_path=None,
         skill_cards_path=None,
+        episode_memory_path=None,
+        route_mode="none",
         config=config,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -692,12 +1087,49 @@ def compare_new_arch_routes(
         eval_timeout=eval_timeout,
         verbose=verbose,
     )
-    if skill_cards_path:
+    if skill_cards_path or skill_store is not None:
         results["base_plus_skill"] = evaluate_new_arch_model(
             tasks,
             model_name=model_name,
             adapter_path=None,
             skill_cards_path=skill_cards_path,
+            skill_store=skill_store,
+            episode_memory_path=None,
+            route_mode="skill",
+            skill_top_k=skill_top_k,
+            config=config,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_attempts=max_attempts,
+            eval_timeout=eval_timeout,
+            verbose=verbose,
+        )
+    if episode_memory_path or episode_store is not None:
+        results["base_plus_episode"] = evaluate_new_arch_model(
+            tasks,
+            model_name=model_name,
+            adapter_path=None,
+            skill_cards_path=None,
+            episode_memory_path=episode_memory_path,
+            episode_store=episode_store,
+            route_mode="episode",
+            config=config,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_attempts=max_attempts,
+            eval_timeout=eval_timeout,
+            verbose=verbose,
+        )
+    if skill_cards_path or skill_store is not None or episode_memory_path or episode_store is not None:
+        results["base_plus_router"] = evaluate_new_arch_model(
+            tasks,
+            model_name=model_name,
+            adapter_path=None,
+            skill_cards_path=skill_cards_path,
+            skill_store=skill_store,
+            episode_memory_path=episode_memory_path,
+            episode_store=episode_store,
+            route_mode="router",
             skill_top_k=skill_top_k,
             config=config,
             max_tokens=max_tokens,
@@ -712,6 +1144,8 @@ def compare_new_arch_routes(
             model_name=model_name,
             adapter_path=adapter_path,
             skill_cards_path=None,
+            episode_memory_path=None,
+            route_mode="none",
             config=config,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -719,12 +1153,16 @@ def compare_new_arch_routes(
             eval_timeout=eval_timeout,
             verbose=verbose,
         )
-    if adapter_path and skill_cards_path:
-        results["adapter_plus_skill"] = evaluate_new_arch_model(
+    if adapter_path and (skill_cards_path or skill_store is not None or episode_memory_path or episode_store is not None):
+        results["adapter_plus_router"] = evaluate_new_arch_model(
             tasks,
             model_name=model_name,
             adapter_path=adapter_path,
             skill_cards_path=skill_cards_path,
+            skill_store=skill_store,
+            episode_memory_path=episode_memory_path,
+            episode_store=episode_store,
+            route_mode="router",
             skill_top_k=skill_top_k,
             config=config,
             max_tokens=max_tokens,
@@ -741,17 +1179,29 @@ def compare_new_arch_routes(
             results["base"],
             results["base_plus_skill"],
         )
+    if "base_plus_episode" in results:
+        comparisons["base_plus_episode_vs_base"] = _compare_route_results(
+            tasks,
+            results["base"],
+            results["base_plus_episode"],
+        )
+    if "base_plus_router" in results:
+        comparisons["base_plus_router_vs_base"] = _compare_route_results(
+            tasks,
+            results["base"],
+            results["base_plus_router"],
+        )
     if "adapter" in results:
         comparisons["adapter_vs_base"] = _compare_route_results(
             tasks,
             results["base"],
             results["adapter"],
         )
-    if "adapter_plus_skill" in results and "adapter" in results:
-        comparisons["adapter_plus_skill_vs_adapter"] = _compare_route_results(
+    if "adapter_plus_router" in results and "adapter" in results:
+        comparisons["adapter_plus_router_vs_adapter"] = _compare_route_results(
             tasks,
             results["adapter"],
-            results["adapter_plus_skill"],
+            results["adapter_plus_router"],
         )
     adapter_comparison = comparisons.get("adapter_vs_base", {})
 
@@ -902,7 +1352,7 @@ def _skill_rows(store: SkillStore, *, limit: int = 10) -> list[dict[str, Any]]:
     cards = sorted(
         list(store),
         key=lambda card: (
-            0 if card.get("status") == "promoted" else 1,
+            {"promoted": 0, "validated": 1, "candidate": 2}.get(card.get("status"), 3),
             -float(card.get("confidence", 0.0) or 0.0),
             -float(card.get("transfer_gain", 0.0) or 0.0),
             -int(card.get("source_episode_count", 0) or 0),
@@ -911,6 +1361,7 @@ def _skill_rows(store: SkillStore, *, limit: int = 10) -> list[dict[str, Any]]:
     rows = []
     for card in cards[:limit]:
         validation = dict(card.get("validation", {}) or {})
+        route_test = dict(validation.get("route_test", {}) or {})
         rows.append({
             "skill_id": card["skill_id"],
             "status": card.get("status", "candidate"),
@@ -925,6 +1376,9 @@ def _skill_rows(store: SkillStore, *, limit: int = 10) -> list[dict[str, Any]]:
             "matched_episodes": int(validation.get("matched_episodes", 0) or 0),
             "matched_tasks": int(validation.get("matched_tasks", 0) or 0),
             "success_rate": float(validation.get("success_rate", 0.0) or 0.0),
+            "route_test_status": route_test.get("status"),
+            "route_delta_passed": route_test.get("delta_passed"),
+            "route_regression_rate": route_test.get("regression_rate"),
             "triggers": list(card.get("triggers", [])[:5]),
             "plan_steps": list(card.get("plan_steps", [])[:3]),
             "activation_conditions": list(card.get("activation_conditions", [])[:3]),
@@ -933,6 +1387,74 @@ def _skill_rows(store: SkillStore, *, limit: int = 10) -> list[dict[str, Any]]:
             "manifest_ids": list(card.get("manifest_ids", [])),
         })
     return rows
+
+
+def _promote_validated_skill_cards(
+    skill_store: SkillStore,
+    holdout_episodes: list[dict],
+    cogmem_config: CogMemConfig,
+) -> SkillStore:
+    holdout_tasks_by_id: dict[str, dict[str, Any]] = {}
+    for episode in holdout_episodes:
+        task_id = episode.get("task_id")
+        if task_id and task_id not in holdout_tasks_by_id:
+            holdout_tasks_by_id[str(task_id)] = _episode_to_eval_task(episode)
+    min_tasks = int(getattr(cogmem_config, "skill_route_promotion_min_tasks", 2))
+    min_delta_passed = int(getattr(cogmem_config, "skill_route_promotion_min_delta_passed", 1))
+    max_regression_rate = float(getattr(cogmem_config, "skill_route_promotion_max_regression_rate", 0.10))
+
+    for card in list(skill_store):
+        if card.get("status") != "validated":
+            continue
+        validation = dict(card.get("validation", {}) or {})
+        matched_task_ids = [
+            task_id
+            for task_id in list(validation.get("validated_task_ids", []) or [])
+            if task_id in holdout_tasks_by_id
+        ]
+        route_test = {
+            "status": "skipped_insufficient_tasks",
+            "task_ids": matched_task_ids[:10],
+            "delta_passed": None,
+            "delta_pass_rate": None,
+            "regression_rate": None,
+            "improved_task_ids": [],
+            "regressed_task_ids": [],
+        }
+        if len(matched_task_ids) >= min_tasks:
+            route_eval = compare_new_arch_routes(
+                [holdout_tasks_by_id[task_id] for task_id in matched_task_ids],
+                model_name=cogmem_config.active_model_hf,
+                skill_store=SkillStore([{**card, "status": "promoted"}]),
+                adapter_path=None,
+                skill_top_k=cogmem_config.skill_retrieval_top_k,
+                config=cogmem_config,
+                max_tokens=2048,
+                temperature=0.0,
+                max_attempts=1,
+                eval_timeout=30,
+                verbose=False,
+            )
+            comparison = dict(route_eval.get("comparisons", {}).get("base_plus_skill_vs_base", {}) or {})
+            route_test = {
+                "status": "promoted" if (
+                    comparison.get("delta_passed", 0) >= min_delta_passed
+                    and comparison.get("regression_rate", 0.0) <= max_regression_rate
+                ) else "validated",
+                "task_ids": matched_task_ids[:10],
+                "delta_passed": comparison.get("delta_passed"),
+                "delta_pass_rate": comparison.get("delta_pass_rate"),
+                "regression_rate": comparison.get("regression_rate"),
+                "improved_task_ids": list(comparison.get("improved_task_ids", []) or [])[:10],
+                "regressed_task_ids": list(comparison.get("regressed_task_ids", []) or [])[:10],
+            }
+        validation["route_test"] = route_test
+        skill_store.update(
+            card["skill_id"],
+            status="promoted" if route_test.get("status") == "promoted" else "validated",
+            validation=validation,
+        )
+    return skill_store
 
 
 def build_new_arch_skill_cards(
@@ -954,6 +1476,8 @@ def build_new_arch_skill_cards(
         config=cogmem_config,
         output_path=skills_path,
     )
+    skill_store = _promote_validated_skill_cards(skill_store, holdout_episodes, cogmem_config)
+    skill_store.save(skills_path)
     promoted_cards = list(skill_store.filter(promoted=True))
     training_pairs = prepare_skill_training_dataset(
         promoted_cards,
@@ -1007,6 +1531,7 @@ def run_new_arch_qstar_cycle(
             eval_tasks,
             model_name=cogmem_config.active_model_hf,
             skill_cards_path=skill_cards_path,
+            episode_memory_path=memory_bank_path,
             adapter_path=None,
             skill_top_k=cogmem_config.skill_retrieval_top_k,
             config=cogmem_config,
@@ -1017,8 +1542,8 @@ def run_new_arch_qstar_cycle(
             eval_timeout=30,
             verbose=False,
         )
-        route_gate = route_eval.get("comparisons", {}).get("base_plus_skill_vs_base", {})
-        persist_route_skill_utility(skill_cards_path, route_eval.get("comparisons", {}))
+        route_gate = route_eval.get("comparisons", {}).get("base_plus_router_vs_base", {})
+        persist_route_memory_utility(skill_cards_path, memory_bank_path, route_eval.get("comparisons", {}))
         min_delta_passed = int(getattr(cogmem_config, "skill_route_gate_min_delta_passed", 1))
         max_regression_rate = float(getattr(cogmem_config, "skill_route_gate_max_regression_rate", 0.10))
         if (
@@ -1070,6 +1595,7 @@ __all__ = [
     "evaluate_new_arch_model",
     "compare_new_arch_base_vs_adapter",
     "compare_new_arch_routes",
+    "persist_route_memory_utility",
     "persist_route_skill_utility",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",

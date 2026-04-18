@@ -62,7 +62,7 @@ def test_proceduralize_episodes_builds_candidate_cards():
     assert "avoid FileNotFoundError failure modes" in card["anti_patterns"]
 
 
-def test_build_skill_cards_validates_and_promotes(tmp_path):
+def test_build_skill_cards_validates_but_does_not_runtime_promote(tmp_path):
     train_episodes = [
         _episode("ep_1", "t1", "Use glob to list files in a directory", success=True, script="1. import glob\n2. list files", q_value=0.9),
         _episode("ep_2", "t2", "Read all files from a directory with glob", success=True, script="1. import glob\n2. open files", q_value=0.8),
@@ -86,7 +86,7 @@ def test_build_skill_cards_validates_and_promotes(tmp_path):
     assert len(store) == 1
     card = next(iter(store))
     assert card["validation"]["matched_episodes"] >= 1
-    assert card["status"] == "promoted"
+    assert card["status"] == "validated"
     assert card["distinct_task_count"] >= 3
     assert card["activation_conditions"]
     assert card["stop_conditions"]
