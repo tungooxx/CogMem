@@ -103,6 +103,14 @@ class TransformersChatClient:
         return self.tokenizer.decode(gen_ids, skip_special_tokens=True)
 
 
+def _ensure_torch_pytree_compat() -> None:
+    """Backfill older torch pytree API expected by newer transformers."""
+    import torch.utils._pytree as pytree
+
+    if not hasattr(pytree, "register_pytree_node") and hasattr(pytree, "_register_pytree_node"):
+        pytree.register_pytree_node = pytree._register_pytree_node
+
+
 def load_new_arch_tasks(
     *,
     task_jsonl_path: str | None = None,
@@ -165,6 +173,8 @@ def load_new_arch_runtime(
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
 ):
     import torch
+
+    _ensure_torch_pytree_compat()
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     bnb_config = BitsAndBytesConfig(
