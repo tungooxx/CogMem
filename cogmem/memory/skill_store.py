@@ -23,6 +23,47 @@ def _dedupe_str_list(values) -> list[str]:
     return result
 
 
+def _normalize_runtime_stats(stats: dict | None) -> dict:
+    target = dict(stats or {})
+    target["retrieved"] = int(target.get("retrieved", 0) or 0)
+    target["helped"] = int(target.get("helped", 0) or 0)
+    target["hurt"] = int(target.get("hurt", 0) or 0)
+    target["preserved_success"] = int(target.get("preserved_success", 0) or 0)
+    target["preserved_failure"] = int(target.get("preserved_failure", 0) or 0)
+    target["passed"] = int(target.get("passed", 0) or 0)
+    target["failed"] = int(target.get("failed", 0) or 0)
+    target["domains"] = {str(k): int(v) for k, v in dict(target.get("domains", {}) or {}).items()}
+    target["error_families"] = {str(k): int(v) for k, v in dict(target.get("error_families", {}) or {}).items()}
+    target["task_ids"] = _dedupe_str_list(target.get("task_ids", []))[:20]
+    target["route_breakdown"] = {
+        str(route): _normalize_runtime_stats(route_stats)
+        for route, route_stats in dict(target.get("route_breakdown", {}) or {}).items()
+    }
+    return target
+
+
+def merge_runtime_stats(existing: dict | None, update: dict | None) -> dict:
+    base = _normalize_runtime_stats(existing)
+    incoming = _normalize_runtime_stats(update)
+    merged = dict(base)
+    for key in ["retrieved", "helped", "hurt", "preserved_success", "preserved_failure", "passed", "failed"]:
+        merged[key] = int(base.get(key, 0)) + int(incoming.get(key, 0))
+    domains = dict(base.get("domains", {}) or {})
+    for key, value in dict(incoming.get("domains", {}) or {}).items():
+        domains[str(key)] = int(domains.get(str(key), 0)) + int(value)
+    merged["domains"] = domains
+    error_families = dict(base.get("error_families", {}) or {})
+    for key, value in dict(incoming.get("error_families", {}) or {}).items():
+        error_families[str(key)] = int(error_families.get(str(key), 0)) + int(value)
+    merged["error_families"] = error_families
+    merged["task_ids"] = _dedupe_str_list(list(base.get("task_ids", [])) + list(incoming.get("task_ids", [])))[:20]
+    route_breakdown = dict(base.get("route_breakdown", {}) or {})
+    for route, route_stats in dict(incoming.get("route_breakdown", {}) or {}).items():
+        route_breakdown[str(route)] = merge_runtime_stats(route_breakdown.get(str(route), {}), route_stats)
+    merged["route_breakdown"] = route_breakdown
+    return merged
+
+
 def _skill_id(card: dict) -> str:
     if card.get("skill_id"):
         return str(card["skill_id"])
@@ -66,6 +107,7 @@ def normalize_skill_card(card: dict, *, copy_card: bool = False) -> dict:
     target["source_episode_count"] = int(target.get("source_episode_count") or len(target["evidence_episode_ids"]))
     target["distinct_task_count"] = int(target.get("distinct_task_count") or len(target["evidence_task_ids"]))
     target["family_key"] = str(target.get("family_key") or skill_family_key(target))
+    target["runtime_stats"] = _normalize_runtime_stats(target.get("runtime_stats", {}))
     transfer_gain = float(target.get("transfer_gain", target.get(CARD_TRANSFER_GAIN_KEY, 0.0)) or 0.0)
     confidence = _clamp01(target.get("confidence", target.get(RETRIEVAL_CONFIDENCE_KEY, 0.0)) or 0.0)
     negative_transfer_rate = _clamp01(
@@ -164,6 +206,23 @@ class SkillStore:
         normalized = normalize_skill_card(card, copy_card=False)
         self._index[skill_id] = normalized
         return normalized
+
+    def apply_runtime_utility(self, utility_by_skill: dict[str, dict], *, route_name: str | None = None) -> int:
+        updated = 0
+        for skill_id, utility in dict(utility_by_skill or {}).items():
+            card = self._index.get(skill_id)
+            if card is None:
+                continue
+            utility_stats = _normalize_runtime_stats(utility)
+            if route_name:
+                route_stats = dict(utility_stats)
+                route_stats["route_breakdown"] = {}
+                utility_stats = dict(utility_stats)
+                utility_stats["route_breakdown"] = {str(route_name): route_stats}
+            merged = merge_runtime_stats(card.get("runtime_stats", {}), utility_stats)
+            self.update(skill_id, runtime_stats=merged)
+            updated += 1
+        return updated
 
     def filter(
         self,

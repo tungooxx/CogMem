@@ -600,6 +600,27 @@ def _compare_route_results(
     }
 
 
+def persist_route_skill_utility(skill_cards_path: str | None, comparisons: dict[str, Any]) -> dict[str, Any]:
+    if not skill_cards_path:
+        return {"skills_path": None, "updated_skills": 0, "updated_routes": []}
+    store = SkillStore.load(skill_cards_path)
+    updated_routes: list[str] = []
+    updated_skills = 0
+    for route_name, route_result in dict(comparisons or {}).items():
+        skill_utility = dict(route_result.get("skill_utility", {}) or {})
+        if not skill_utility:
+            continue
+        updated_skills += store.apply_runtime_utility(skill_utility, route_name=route_name)
+        updated_routes.append(route_name)
+    if updated_routes:
+        store.save(skill_cards_path)
+    return {
+        "skills_path": skill_cards_path,
+        "updated_skills": updated_skills,
+        "updated_routes": updated_routes,
+    }
+
+
 def compare_new_arch_base_vs_adapter(
     eval_tasks: list[dict],
     *,
@@ -987,6 +1008,7 @@ def run_new_arch_qstar_cycle(
             verbose=False,
         )
         route_gate = route_eval.get("comparisons", {}).get("base_plus_skill_vs_base", {})
+        persist_route_skill_utility(skill_cards_path, route_eval.get("comparisons", {}))
         min_delta_passed = int(getattr(cogmem_config, "skill_route_gate_min_delta_passed", 1))
         max_regression_rate = float(getattr(cogmem_config, "skill_route_gate_max_regression_rate", 0.10))
         if (
@@ -1038,6 +1060,7 @@ __all__ = [
     "evaluate_new_arch_model",
     "compare_new_arch_base_vs_adapter",
     "compare_new_arch_routes",
+    "persist_route_skill_utility",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",
     "run_new_arch_qstar_cycle",

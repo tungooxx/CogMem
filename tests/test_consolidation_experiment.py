@@ -4,9 +4,11 @@ from cogmem.consolidation.experiment import (
     _run_task_with_skill_cards,
     compare_new_arch_base_vs_adapter,
     compare_new_arch_routes,
+    persist_route_skill_utility,
     run_new_arch_qstar_cycle,
 )
 from cogmem.config import CogMemConfig
+from cogmem.memory.skill_store import SkillStore
 
 
 def test_compare_new_arch_base_vs_adapter_reports_improvements(monkeypatch):
@@ -242,3 +244,44 @@ def test_run_task_with_skill_cards_reranks_after_failure(monkeypatch):
     assert result["success"] is True
     assert result["retrieved_skill_history"] == [["skill_plot"], ["skill_fix_assertion"]]
     assert result["retrieved_skill_ids"] == ["skill_plot", "skill_fix_assertion"]
+
+
+def test_persist_route_skill_utility_updates_skill_store(tmp_path):
+    skills_path = tmp_path / "skills.json"
+    SkillStore(
+        [
+            {
+                "skill_id": "skill_plot",
+                "task_type": "matplotlib:plot",
+                "domain": "matplotlib",
+                "status": "promoted",
+            }
+        ]
+    ).save(str(skills_path))
+
+    persist_result = persist_route_skill_utility(
+        str(skills_path),
+        {
+            "base_plus_skill_vs_base": {
+                "skill_utility": {
+                    "skill_plot": {
+                        "retrieved": 2,
+                        "helped": 1,
+                        "hurt": 0,
+                        "passed": 1,
+                        "failed": 1,
+                        "domains": {"matplotlib": 2},
+                        "error_families": {"AssertionError": 1},
+                        "task_ids": ["task_1", "task_2"],
+                    }
+                }
+            }
+        },
+    )
+
+    updated = SkillStore.load(str(skills_path)).get("skill_plot")
+    assert persist_result["updated_routes"] == ["base_plus_skill_vs_base"]
+    assert updated["runtime_stats"]["retrieved"] == 2
+    assert updated["runtime_stats"]["helped"] == 1
+    assert updated["runtime_stats"]["domains"]["matplotlib"] == 2
+    assert updated["runtime_stats"]["route_breakdown"]["base_plus_skill_vs_base"]["retrieved"] == 2
