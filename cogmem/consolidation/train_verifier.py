@@ -110,6 +110,8 @@ def train_verifier(
 
     bits = config.quantization_bits
     model, use_kbit = _load_model_for_training(config.active_model_hf, bits=bits)
+    if hasattr(model, "config"):
+        model.config.use_cache = False
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

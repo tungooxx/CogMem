@@ -202,6 +202,8 @@ def train_generator_sft(
         config.active_model_hf,
         bits=config.quantization_bits,
     )
+    if hasattr(model, "config"):
+        model.config.use_cache = False
     if use_kbit:
         model = prepare_model_for_kbit_training(model)
 
@@ -335,6 +337,8 @@ def train_generator_dpo(
     else:
         model = base_model
 
+    if hasattr(model, "config"):
+        model.config.use_cache = False
     if use_kbit:
         model = prepare_model_for_kbit_training(model)
 
