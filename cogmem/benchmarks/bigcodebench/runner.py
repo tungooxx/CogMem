@@ -146,6 +146,7 @@ def _make_episode(
         "source_benchmark": task.get("source_benchmark", "bigcodebench"),
         "error": trajectory[-1].get("error") if trajectory else None,
         "entry_point": task.get("entry_point", ""),
+        "libs": task.get("libs", []),
         "trajectory": trajectory,
         "num_attempts": len(trajectory),
         "timestamp": time.time(),

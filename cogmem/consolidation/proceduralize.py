@@ -18,6 +18,35 @@ from cogmem.memory.skill_store import SkillStore, normalize_skill_card
 TRIGGER_STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that", "write", "function", "return",
     "using", "into", "your", "task", "python", "code", "given", "input", "output", "list",
+    "you", "starting", "task_func", "import", "contained", "complete", "prompt", "answer",
+    "solution", "implement", "generate", "generated", "following", "provided", "script",
+    "assistant", "please", "should", "after", "before",
+}
+
+GENERIC_TASK_TYPES = {"general", "bigcodebench"}
+
+FEATURE_KEYWORDS = {
+    "pandas": ["groupby", "merge", "pivot", "read_csv", "columns", "fillna", "sort_values"],
+    "numpy": ["reshape", "linspace", "ndarray", "array", "mean", "std"],
+    "matplotlib": ["plot", "scatter", "hist", "bar", "subplot", "figure", "seaborn"],
+    "file_io": ["glob", "pathlib", "shutil", "json", "yaml", "csv", "open"],
+    "regex": ["regex", "findall", "search", "match", "sub"],
+    "datetime": ["strftime", "strptime", "timedelta", "timezone"],
+    "json_xml": ["json", "xml", "yaml", "csv"],
+    "math": ["random", "statistics", "mean", "median", "sample", "normal"],
+    "collections": ["counter", "defaultdict", "deque", "ordereddict"],
+    "itertools": ["permutations", "combinations", "chain", "product"],
+    "subprocess": ["subprocess", "popen", "system"],
+    "string": ["split", "join", "replace", "strip", "format"],
+    "crypto": ["hashlib", "hmac", "base64"],
+}
+
+PLAN_STEP_STOPWORDS = {
+    "code:",
+    "python:",
+    "```",
+    "```python",
+    "response:",
 }
 
 
@@ -38,8 +67,35 @@ def _episode_domain(episode: dict) -> str:
     return categorize_domain(code, desc)
 
 
+def _feature_bucket(episode: dict, domain: str | None = None) -> str:
+    target_domain = domain or _episode_domain(episode)
+    text = " ".join(
+        [
+            episode.get("task_description", ""),
+            episode.get("final_code", "") or episode.get("generated_code", "") or episode.get("script", ""),
+            " ".join(episode.get("libs", []) or []),
+            episode.get("entry_point", "") or "",
+        ]
+    ).lower()
+    for keyword in FEATURE_KEYWORDS.get(target_domain, []):
+        if keyword in text:
+            return keyword.replace(".", "_").replace("(", "")
+
+    tokens = [token for token in _description_tokens(episode.get("task_description", "")) if token != target_domain]
+    return tokens[0] if tokens else target_domain
+
+
 def _group_key(episode: dict) -> str:
-    return str(episode.get("task_type", "general") or "general")
+    base_task_type = str(episode.get("task_type", "general") or "general")
+    domain = _episode_domain(episode)
+    feature = _feature_bucket(episode, domain)
+
+    if base_task_type in GENERIC_TASK_TYPES:
+        if domain != "general" and feature and feature != domain:
+            return f"{domain}:{feature}"
+        return domain if domain != "general" else base_task_type
+
+    return base_task_type
 
 
 def _derive_triggers(episodes: list[dict], limit: int) -> list[str]:
@@ -48,11 +104,11 @@ def _derive_triggers(episodes: list[dict], limit: int) -> list[str]:
     for ep in episodes:
         counts.update(set(_description_tokens(ep.get("task_description", ""))))
         libs.update(ep.get("libs", []) or [])
-        if ep.get("task_type"):
+        if ep.get("task_type") and ep.get("task_type") not in GENERIC_TASK_TYPES:
             counts[ep["task_type"]] += 2
     ordered = [token for token, _ in counts.most_common(limit)]
     for lib, _ in libs.most_common(limit):
-        if lib not in ordered:
+        if lib and lib not in TRIGGER_STOPWORDS and lib not in ordered:
             ordered.append(lib)
         if len(ordered) >= limit:
             break
@@ -65,7 +121,13 @@ def _derive_plan_steps(success_episodes: list[dict], limit: int) -> list[str]:
         script = ep.get("script") or ""
         for raw_line in script.splitlines():
             line = re.sub(r"^\d+\.\s*", "", raw_line.strip())
-            if 4 <= len(line) <= 100:
+            lowered = line.lower()
+            if (
+                4 <= len(line) <= 100
+                and lowered not in PLAN_STEP_STOPWORDS
+                and not lowered.startswith("```")
+                and not lowered.startswith("here")
+            ):
                 steps[line] += 1
     if steps:
         return [step for step, _ in steps.most_common(limit)]
@@ -144,14 +206,14 @@ def proceduralize_episodes(episodes: list[dict], config=None) -> list[dict]:
 def _card_matches_episode(card: dict, episode: dict) -> bool:
     if episode.get("episode_id") in set(card.get("evidence_episode_ids", [])):
         return False
-    if card.get("task_type") and episode.get("task_type") == card["task_type"]:
+    if card.get("task_type") and _group_key(episode) == card["task_type"]:
         return True
     code = episode.get("final_code") or episode.get("generated_code") or episode.get("script") or ""
     domain = categorize_domain(code, episode.get("task_description", ""))
-    if card.get("domain") and domain == card["domain"]:
-        return True
     episode_tokens = set(_description_tokens(episode.get("task_description", "")))
     trigger_tokens = {token.lower() for token in card.get("triggers", [])}
+    if card.get("domain") and domain == card["domain"] and trigger_tokens and (episode_tokens & trigger_tokens):
+        return True
     return bool(episode_tokens & trigger_tokens)
 
 

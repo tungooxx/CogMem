@@ -18,6 +18,8 @@ def _episode(
     task_type: str = "file_io",
     manifest_id: str = "manifest_a",
     error: str | None = None,
+    entry_point: str = "",
+    libs: list[str] | None = None,
 ) -> dict:
     return {
         "episode_id": episode_id,
@@ -35,6 +37,8 @@ def _episode(
         "manifest_id": manifest_id,
         "source_benchmark": "bigcodebench",
         "error": error,
+        "entry_point": entry_point,
+        "libs": libs or [],
     }
 
 
@@ -114,3 +118,150 @@ def test_validate_skill_card_entrypoint(tmp_path):
 
     assert validated["skill_id"] == skill_id
     assert validated["validation"]["matched_episodes"] == 1
+
+
+def test_proceduralize_bigcodebench_splits_by_domain_and_filters_template_tokens():
+    episodes = [
+        _episode(
+            "ep_p1",
+            "t1",
+            "You are starting task_func to group dataframe rows with pandas groupby",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('city').sum()",
+            q_value=0.9,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_p2",
+            "t2",
+            "Use pandas to merge and group dataframe columns",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('team').mean()",
+            q_value=0.85,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_p3",
+            "t3",
+            "Aggregate dataframe totals with pandas groupby",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('dept').size()",
+            q_value=0.8,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_f1",
+            "t4",
+            "You are starting task_func to list files with glob and pathlib",
+            success=True,
+            script="1. import glob\n2. glob.glob('*.csv')",
+            q_value=0.92,
+            task_type="bigcodebench",
+            libs=["glob", "pathlib"],
+        ),
+        _episode(
+            "ep_f2",
+            "t5",
+            "Read matching files using pathlib and glob",
+            success=True,
+            script="1. from pathlib import Path\n2. list(Path('.').glob('*.txt'))",
+            q_value=0.88,
+            task_type="bigcodebench",
+            libs=["pathlib"],
+        ),
+        _episode(
+            "ep_f3",
+            "t6",
+            "Open files safely after glob matching",
+            success=True,
+            script="1. import glob\n2. files = glob.glob('*.json')",
+            q_value=0.83,
+            task_type="bigcodebench",
+            libs=["glob"],
+        ),
+    ]
+    cfg = CogMemConfig(skill_min_evidence=3)
+
+    cards = proceduralize_episodes(episodes, config=cfg)
+
+    assert len(cards) == 2
+    task_types = {card["task_type"] for card in cards}
+    assert "pandas:groupby" in task_types
+    assert "file_io:glob" in task_types
+    pandas_card = next(card for card in cards if card["task_type"] == "pandas:groupby")
+    assert "task_func" not in pandas_card["triggers"]
+    assert "starting" not in pandas_card["triggers"]
+    assert "import" not in pandas_card["triggers"]
+
+
+def test_validate_skill_cards_do_not_match_all_bigcodebench_tasks(tmp_path):
+    train_episodes = [
+        _episode(
+            "ep_1",
+            "t1",
+            "Use pandas groupby to aggregate dataframe rows",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('city').sum()",
+            q_value=0.9,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_2",
+            "t2",
+            "Aggregate dataframe columns with pandas groupby",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('team').mean()",
+            q_value=0.8,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_3",
+            "t3",
+            "Summarize dataframe totals via groupby",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('dept').size()",
+            q_value=0.75,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+    ]
+    dev_episodes = [
+        _episode(
+            "ep_4",
+            "dev1",
+            "Use pandas groupby to inspect dataframe totals",
+            success=True,
+            script="1. import pandas as pd\n2. df.groupby('name').count()",
+            q_value=0.95,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
+        _episode(
+            "ep_5",
+            "dev2",
+            "List matching files with glob in a directory",
+            success=True,
+            script="1. import glob\n2. glob.glob('*.csv')",
+            q_value=0.85,
+            task_type="bigcodebench",
+            libs=["glob"],
+        ),
+    ]
+    cfg = CogMemConfig(
+        skill_min_evidence=3,
+        skill_validation_min_matches=1,
+        skill_min_transfer_gain=0.0,
+        skill_confidence_threshold=0.0,
+    )
+    path = tmp_path / "skills.json"
+
+    store = build_skill_cards(train_episodes, dev_episodes, config=cfg, output_path=str(path))
+
+    card = next(iter(store))
+    assert card["task_type"] == "pandas:groupby"
+    assert card["validation"]["matched_episodes"] == 1
