@@ -165,7 +165,7 @@ def train_verifier(
         report_to="none",
         max_length=2048,
         max_prompt_length=512,
-        gradient_checkpointing=use_kbit,
+        gradient_checkpointing=True,
     )
 
     trainer = _KbitSafeDPOTrainer(

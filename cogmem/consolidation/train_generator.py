@@ -248,7 +248,7 @@ def train_generator_sft(
             optim="paged_adamw_8bit" if use_kbit else "adamw_torch",
             report_to="none",
             seed=config.seed,
-            gradient_checkpointing=use_kbit,
+            gradient_checkpointing=True,
         ),
         train_dataset=dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
@@ -375,7 +375,7 @@ def train_generator_dpo(
         report_to="none",
         max_length=2048,
         max_prompt_length=512,
-        gradient_checkpointing=use_kbit,
+        gradient_checkpointing=True,
     )
 
     trainer = _KbitSafeDPOTrainer(
