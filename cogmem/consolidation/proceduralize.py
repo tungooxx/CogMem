@@ -21,6 +21,7 @@ TRIGGER_STOPWORDS = {
     "you", "starting", "task_func", "import", "contained", "complete", "prompt", "answer",
     "solution", "implement", "generate", "generated", "following", "provided", "script",
     "assistant", "please", "should", "after", "before",
+    "self", "def", "data", "each", "contains",
 }
 
 GENERIC_TASK_TYPES = {"general", "bigcodebench"}
@@ -47,6 +48,7 @@ PLAN_STEP_STOPWORDS = {
     "```",
     "```python",
     "response:",
+    "thought:",
 }
 
 
@@ -85,6 +87,28 @@ def _feature_bucket(episode: dict, domain: str | None = None) -> str:
     return tokens[0] if tokens else target_domain
 
 
+def _card_feature(card: dict) -> str | None:
+    task_type = str(card.get("task_type", "") or "")
+    if ":" in task_type:
+        return task_type.split(":", 1)[1]
+    if task_type and task_type not in GENERIC_TASK_TYPES and task_type != card.get("domain"):
+        return task_type
+    return None
+
+
+def _episode_hint_tokens(episode: dict) -> set[str]:
+    tokens = set(_description_tokens(episode.get("task_description", "")))
+    for lib in episode.get("libs", []) or []:
+        for token in re.findall(r"[a-zA-Z_]{3,}", str(lib).lower()):
+            if token not in TRIGGER_STOPWORDS:
+                tokens.add(token)
+    entry_point = str(episode.get("entry_point", "") or "").lower()
+    for token in re.findall(r"[a-zA-Z_]{3,}", entry_point):
+        if token not in TRIGGER_STOPWORDS:
+            tokens.add(token)
+    return tokens
+
+
 def _group_key(episode: dict) -> str:
     base_task_type = str(episode.get("task_type", "general") or "general")
     domain = _episode_domain(episode)
@@ -118,8 +142,8 @@ def _derive_triggers(episodes: list[dict], limit: int) -> list[str]:
 def _derive_plan_steps(success_episodes: list[dict], limit: int) -> list[str]:
     steps = Counter()
     for ep in success_episodes:
-        script = ep.get("script") or ""
-        for raw_line in script.splitlines():
+        source = ep.get("final_code") or ep.get("generated_code") or ep.get("script") or ""
+        for raw_line in source.splitlines():
             line = re.sub(r"^\d+\.\s*", "", raw_line.strip())
             lowered = line.lower()
             if (
@@ -127,7 +151,21 @@ def _derive_plan_steps(success_episodes: list[dict], limit: int) -> list[str]:
                 and lowered not in PLAN_STEP_STOPWORDS
                 and not lowered.startswith("```")
                 and not lowered.startswith("here")
+                and not lowered.startswith("thought:")
+                and not lowered.startswith("observation:")
+                and not lowered.startswith("analysis:")
+                and not lowered.startswith("to solve")
+                and not lowered.startswith("we ")
+                and not lowered.startswith("let's")
+                and not lowered.startswith("i need")
             ):
+                if source == (ep.get("final_code") or ep.get("generated_code") or ""):
+                    if not re.search(
+                        r"(import |from | = | for | if | while | return |append\(|read_|write_|"
+                        r"groupby\(|plot\(|json\.|np\.|pd\.|plt\.|Path\(|glob\.)",
+                        line,
+                    ):
+                        continue
                 steps[line] += 1
     if steps:
         return [step for step, _ in steps.most_common(limit)]
@@ -206,15 +244,26 @@ def proceduralize_episodes(episodes: list[dict], config=None) -> list[dict]:
 def _card_matches_episode(card: dict, episode: dict) -> bool:
     if episode.get("episode_id") in set(card.get("evidence_episode_ids", [])):
         return False
-    if card.get("task_type") and _group_key(episode) == card["task_type"]:
+    episode_group = _group_key(episode)
+    if card.get("task_type") and episode_group == card["task_type"]:
         return True
     code = episode.get("final_code") or episode.get("generated_code") or episode.get("script") or ""
     domain = categorize_domain(code, episode.get("task_description", ""))
-    episode_tokens = set(_description_tokens(episode.get("task_description", "")))
-    trigger_tokens = {token.lower() for token in card.get("triggers", [])}
-    if card.get("domain") and domain == card["domain"] and trigger_tokens and (episode_tokens & trigger_tokens):
-        return True
-    return bool(episode_tokens & trigger_tokens)
+    if card.get("domain") and card["domain"] != "general" and domain != card["domain"]:
+        return False
+
+    card_feature = _card_feature(card)
+    episode_feature = _feature_bucket(episode, domain)
+    if card_feature and episode_feature != card_feature:
+        return False
+
+    episode_tokens = _episode_hint_tokens(episode)
+    trigger_tokens = {token.lower() for token in card.get("triggers", []) if token.lower() not in TRIGGER_STOPWORDS}
+    overlap = episode_tokens & trigger_tokens
+
+    if card_feature and card_feature in episode_tokens:
+        return len(overlap) >= 1
+    return len(overlap) >= 2
 
 
 def validate_skill_card_record(card: dict, dev_episodes: list[dict], config=None) -> dict:

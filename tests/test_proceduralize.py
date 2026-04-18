@@ -195,6 +195,8 @@ def test_proceduralize_bigcodebench_splits_by_domain_and_filters_template_tokens
     assert "task_func" not in pandas_card["triggers"]
     assert "starting" not in pandas_card["triggers"]
     assert "import" not in pandas_card["triggers"]
+    assert "self" not in pandas_card["triggers"]
+    assert "def" not in pandas_card["triggers"]
 
 
 def test_validate_skill_cards_do_not_match_all_bigcodebench_tasks(tmp_path):
@@ -251,6 +253,16 @@ def test_validate_skill_cards_do_not_match_all_bigcodebench_tasks(tmp_path):
             task_type="bigcodebench",
             libs=["glob"],
         ),
+        _episode(
+            "ep_6",
+            "dev3",
+            "Merge dataframe columns with pandas",
+            success=True,
+            script="1. import pandas as pd\n2. df.merge(other, on='id')",
+            q_value=0.82,
+            task_type="bigcodebench",
+            libs=["pandas"],
+        ),
     ]
     cfg = CogMemConfig(
         skill_min_evidence=3,
@@ -265,3 +277,44 @@ def test_validate_skill_cards_do_not_match_all_bigcodebench_tasks(tmp_path):
     card = next(iter(store))
     assert card["task_type"] == "pandas:groupby"
     assert card["validation"]["matched_episodes"] == 1
+
+
+def test_plan_steps_prefer_code_over_reasoning_text():
+    episodes = [
+        _episode(
+            "ep_1",
+            "t1",
+            "Plot chart with matplotlib",
+            success=True,
+            script="Thought: To solve this task, I need to:\nimport matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(xs, ys)",
+            q_value=0.9,
+            task_type="bigcodebench",
+            libs=["matplotlib"],
+        ),
+        _episode(
+            "ep_2",
+            "t2",
+            "Render matplotlib plot for the series",
+            success=True,
+            script="Thought: To solve this task, I need to:\nimport matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(xs2, ys2)",
+            q_value=0.85,
+            task_type="bigcodebench",
+            libs=["matplotlib"],
+        ),
+        _episode(
+            "ep_3",
+            "t3",
+            "Build a matplotlib plot figure",
+            success=True,
+            script="Thought: To solve this task, I need to:\nimport matplotlib.pyplot as plt\nfig, ax = plt.subplots()\nax.plot(xs3, ys3)",
+            q_value=0.8,
+            task_type="bigcodebench",
+            libs=["matplotlib"],
+        ),
+    ]
+    cfg = CogMemConfig(skill_min_evidence=3)
+
+    cards = proceduralize_episodes(episodes, config=cfg)
+
+    card = next(card for card in cards if card["task_type"] == "matplotlib:plot")
+    assert all(not step.startswith("Thought:") for step in card["plan_steps"])
