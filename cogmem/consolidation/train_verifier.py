@@ -22,6 +22,27 @@ from transformers import (
 )
 
 
+def _uses_kbit_weights(model) -> bool:
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(model, "base_model", None),
+        getattr(getattr(model, "base_model", None), "model", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if getattr(candidate, "is_loaded_in_4bit", False) or getattr(candidate, "is_loaded_in_8bit", False):
+            return True
+    return False
+
+
+def _precision_kwargs() -> dict[str, bool]:
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return {"bf16": True, "fp16": False}
+    return {"bf16": False, "fp16": True}
+
+
 def train_verifier(
     preference_dataset: Dataset,
     config,
@@ -41,6 +62,7 @@ def train_verifier(
 
     output_dir = str(Path(config.adapters_dir) / f"verifier_v{cycle}")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    precision_kwargs = _precision_kwargs()
 
     bits = config.quantization_bits
     if bits == 4:
@@ -79,6 +101,12 @@ def train_verifier(
         use_dora=config.use_dora,
     )
 
+    class _KbitSafeDPOTrainer(DPOTrainer):
+        def _move_model_to_device(self, model, device):
+            if _uses_kbit_weights(model):
+                return model
+            return super()._move_model_to_device(model, device)
+
     dpo_config = DPOConfig(
         output_dir=output_dir,
         num_train_epochs=config.verifier_epochs,
@@ -89,7 +117,7 @@ def train_verifier(
         warmup_ratio=0.1,
         logging_steps=10,
         save_strategy="epoch",
-        bf16=True,
+        **precision_kwargs,
         seed=config.seed,
         report_to="none",
         max_length=2048,
@@ -97,7 +125,7 @@ def train_verifier(
         gradient_checkpointing=True,
     )
 
-    trainer = DPOTrainer(
+    trainer = _KbitSafeDPOTrainer(
         model=model,
         args=dpo_config,
         train_dataset=preference_dataset,

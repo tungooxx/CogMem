@@ -42,6 +42,34 @@ def _make_bnb_config(bits: int) -> BitsAndBytesConfig:
     return BitsAndBytesConfig(load_in_8bit=True)
 
 
+def _uses_kbit_weights(model) -> bool:
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(model, "base_model", None),
+        getattr(getattr(model, "base_model", None), "model", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if getattr(candidate, "is_loaded_in_4bit", False) or getattr(candidate, "is_loaded_in_8bit", False):
+            return True
+    return False
+
+
+def _precision_kwargs() -> dict[str, bool]:
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return {"bf16": True, "fp16": False}
+    return {"bf16": False, "fp16": True}
+
+
+class _KbitSafeTrainer(Trainer):
+    def _move_model_to_device(self, model, device):
+        if _uses_kbit_weights(model):
+            return model
+        return super()._move_model_to_device(model, device)
+
+
 def _make_lora_config(config, use_dora: bool = True) -> LoraConfig:
     return LoraConfig(
         r=config.generator_rank,
@@ -129,6 +157,7 @@ def train_generator_sft(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     bnb_config = _make_bnb_config(config.quantization_bits)
+    precision_kwargs = _precision_kwargs()
 
     tokenizer = AutoTokenizer.from_pretrained(config.active_model_hf)
     if tokenizer.pad_token is None:
@@ -158,7 +187,7 @@ def train_generator_sft(
     gc.collect()
     torch.cuda.empty_cache()
 
-    trainer = Trainer(
+    trainer = _KbitSafeTrainer(
         model=model,
         args=TrainingArguments(
             output_dir=output_dir,
@@ -171,7 +200,7 @@ def train_generator_sft(
             save_strategy="steps",
             save_steps=200,
             save_total_limit=2,
-            fp16=True,
+            **precision_kwargs,
             optim="paged_adamw_8bit",
             report_to="none",
             seed=config.seed,
@@ -254,6 +283,7 @@ def train_generator_dpo(
     output_dir = str(Path(config.adapters_dir) / f"generator_v{cycle}")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    precision_kwargs = _precision_kwargs()
     bnb_config = _make_bnb_config(config.quantization_bits)
 
     # Load base model
@@ -283,6 +313,12 @@ def train_generator_dpo(
 
     lora_config = _make_lora_config(config, use_dora=config.use_dora)
 
+    class _KbitSafeDPOTrainer(DPOTrainer):
+        def _move_model_to_device(self, model, device):
+            if _uses_kbit_weights(model):
+                return model
+            return super()._move_model_to_device(model, device)
+
     dpo_config = DPOConfig(
         output_dir=output_dir,
         num_train_epochs=config.generator_dpo_epochs,
@@ -293,7 +329,7 @@ def train_generator_dpo(
         warmup_ratio=0.1,
         logging_steps=10,
         save_strategy="epoch",
-        bf16=True,
+        **precision_kwargs,
         seed=config.seed,
         report_to="none",
         max_length=2048,
@@ -301,7 +337,7 @@ def train_generator_dpo(
         gradient_checkpointing=True,
     )
 
-    trainer = DPOTrainer(
+    trainer = _KbitSafeDPOTrainer(
         model=model,
         args=dpo_config,
         train_dataset=pref_dataset,
