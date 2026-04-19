@@ -306,8 +306,8 @@ def _episode_route_disabled(episode: dict, config: CogMemConfig | None = None) -
     retrieved = int(runtime_stats.get("retrieved", 0) or 0)
     hurt = int(runtime_stats.get("hurt", 0) or 0)
     helped = int(runtime_stats.get("helped", 0) or 0)
-    min_retrieved = int(getattr(config, "episode_runtime_disable_min_retrieved", 8))
-    min_hurt = int(getattr(config, "episode_runtime_disable_min_hurt", 3))
+    min_retrieved = int(getattr(config, "episode_runtime_disable_min_retrieved", 3))
+    min_hurt = int(getattr(config, "episode_runtime_disable_min_hurt", 1))
     hurt_rate_threshold = float(getattr(config, "episode_runtime_disable_hurt_rate", 0.10))
     if retrieved < min_retrieved:
         return False
@@ -1046,6 +1046,76 @@ def reset_route_runtime_utility(
     }
 
 
+def inspect_promoted_skill_routing(
+    skill_cards_path: str | None,
+    tasks: list[dict],
+    *,
+    config: CogMemConfig | None = None,
+    task_limit: int = 5,
+    skill_top_k: int = 3,
+) -> dict[str, Any]:
+    """Summarize why promoted skills are or are not retrieved for a few tasks."""
+    if not skill_cards_path:
+        return {
+            "skills_path": skill_cards_path,
+            "promoted": 0,
+            "promoted_families": 0,
+            "promoted_cards": [],
+            "task_scores": [],
+        }
+
+    store = SkillStore.load(skill_cards_path)
+    summary = store.summary()
+    promoted_cards = []
+    for card in store.filter(promoted=True):
+        validation = dict(card.get("validation", {}) or {})
+        promoted_cards.append({
+            "skill_id": card["skill_id"],
+            "status": card.get("status", "candidate"),
+            "family_key": card.get("family_key") or card.get("task_type") or card.get("domain"),
+            "task_type": card.get("task_type", "general"),
+            "domain": card.get("domain", "general"),
+            "route_test": validation.get("route_test", {}),
+            "runtime_stats": card.get("runtime_stats", {}),
+        })
+
+    task_scores = []
+    for task in list(tasks[:task_limit]):
+        record = task_to_skill_record(task)
+        scored = score_skill_cards_for_record(
+            store,
+            record,
+            limit=skill_top_k,
+            promoted_only=True,
+            config=config,
+        )
+        task_scores.append({
+            "task_id": task.get("task_id"),
+            "libs": list(task.get("libs", []) or [])[:5],
+            "scores": [
+                {
+                    "skill_id": card["skill_id"],
+                    "score": round(float(score), 4),
+                    "status": card.get("status", "candidate"),
+                    "family_key": card.get("family_key") or card.get("task_type") or card.get("domain"),
+                    "task_type": card.get("task_type", "general"),
+                    "domain": card.get("domain", "general"),
+                    "route_test": dict(card.get("validation", {}) or {}).get("route_test", {}),
+                    "runtime_stats": card.get("runtime_stats", {}),
+                }
+                for score, card in scored
+            ],
+        })
+
+    return {
+        "skills_path": skill_cards_path,
+        "promoted": summary.get("promoted", 0),
+        "promoted_families": summary.get("promoted_families", 0),
+        "promoted_cards": promoted_cards,
+        "task_scores": task_scores,
+    }
+
+
 def compare_new_arch_base_vs_adapter(
     eval_tasks: list[dict],
     *,
@@ -1632,6 +1702,7 @@ __all__ = [
     "persist_route_memory_utility",
     "persist_route_skill_utility",
     "reset_route_runtime_utility",
+    "inspect_promoted_skill_routing",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",
     "run_new_arch_qstar_cycle",

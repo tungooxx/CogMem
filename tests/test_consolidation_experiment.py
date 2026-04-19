@@ -7,6 +7,7 @@ from cogmem.consolidation.experiment import (
     build_new_arch_skill_cards,
     compare_new_arch_base_vs_adapter,
     compare_new_arch_routes,
+    inspect_promoted_skill_routing,
     persist_route_memory_utility,
     persist_route_skill_utility,
     reset_route_runtime_utility,
@@ -463,6 +464,42 @@ def test_reset_route_runtime_utility_clears_skill_and_episode_stats(tmp_path):
     assert skill["runtime_stats"]["hurt"] == 0
     assert episode["runtime_stats"]["retrieved"] == 0
     assert episode["runtime_stats"]["hurt"] == 0
+
+
+def test_inspect_promoted_skill_routing_reports_scores(tmp_path):
+    skills_path = tmp_path / "skills.json"
+    SkillStore(
+        [
+            {
+                "skill_id": "skill_plot",
+                "task_type": "matplotlib:plot",
+                "domain": "matplotlib",
+                "status": "promoted",
+                "confidence": 0.9,
+                "transfer_gain": 0.5,
+                "triggers": ["matplotlib", "plot"],
+                "validation": {
+                    "route_test": {
+                        "status": "promoted",
+                        "delta_passed": 2,
+                        "regression_rate": 0.0,
+                    }
+                },
+            }
+        ]
+    ).save(str(skills_path))
+
+    result = inspect_promoted_skill_routing(
+        str(skills_path),
+        [{"task_id": "task_plot", "instruct_prompt": "plot data with matplotlib", "libs": ["matplotlib"]}],
+        config=CogMemConfig(skill_retrieval_strict_min_score=1.0),
+        task_limit=1,
+    )
+
+    assert result["promoted"] == 1
+    assert result["promoted_cards"][0]["route_test"]["status"] == "promoted"
+    assert result["task_scores"][0]["task_id"] == "task_plot"
+    assert result["task_scores"][0]["scores"][0]["skill_id"] == "skill_plot"
 
 
 def test_build_new_arch_skill_cards_requires_route_win_for_promotion(tmp_path, monkeypatch):

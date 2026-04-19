@@ -477,8 +477,8 @@ def _runtime_route_disabled(card: dict, config=None) -> bool:
     retrieved = int(runtime_stats.get("retrieved", 0) or 0)
     hurt = int(runtime_stats.get("hurt", 0) or 0)
     helped = int(runtime_stats.get("helped", 0) or 0)
-    min_retrieved = int(getattr(config, "skill_runtime_disable_min_retrieved", 8))
-    min_hurt = int(getattr(config, "skill_runtime_disable_min_hurt", 3))
+    min_retrieved = int(getattr(config, "skill_runtime_disable_min_retrieved", 3))
+    min_hurt = int(getattr(config, "skill_runtime_disable_min_hurt", 1))
     hurt_rate_threshold = float(getattr(config, "skill_runtime_disable_hurt_rate", 0.10))
     if retrieved < min_retrieved:
         return False

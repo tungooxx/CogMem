@@ -92,8 +92,8 @@ class CogMemConfig:
     episode_retrieval_allow_first_attempt: bool = False
     episode_retrieval_min_score: float = 7.0
     episode_retrieval_retry_min_score: float = 5.5
-    episode_runtime_disable_min_retrieved: int = 8
-    episode_runtime_disable_min_hurt: int = 3
+    episode_runtime_disable_min_retrieved: int = 3
+    episode_runtime_disable_min_hurt: int = 1
     episode_runtime_disable_hurt_rate: float = 0.10
     skill_route_promotion_min_tasks: int = 4
     skill_route_promotion_min_delta_passed: int = 2
