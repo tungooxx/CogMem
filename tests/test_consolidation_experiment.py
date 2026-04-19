@@ -9,6 +9,7 @@ from cogmem.consolidation.experiment import (
     compare_new_arch_routes,
     persist_route_memory_utility,
     persist_route_skill_utility,
+    reset_route_runtime_utility,
     run_new_arch_qstar_cycle,
     select_runtime_route,
 )
@@ -416,6 +417,52 @@ def test_persist_route_memory_utility_updates_skill_and_episode_stores(tmp_path)
     assert updated_episode["runtime_stats"]["retrieved"] == 2
     assert updated_episode["runtime_stats"]["helped"] == 1
     assert updated_episode["runtime_stats"]["route_breakdown"]["base_plus_skill_vs_base"]["retrieved"] == 2
+
+
+def test_reset_route_runtime_utility_clears_skill_and_episode_stats(tmp_path):
+    skills_path = tmp_path / "skills.json"
+    memory_bank_path = tmp_path / "memory_bank.json"
+    SkillStore(
+        [
+            {
+                "skill_id": "skill_plot",
+                "task_type": "matplotlib:plot",
+                "domain": "matplotlib",
+                "status": "promoted",
+                "runtime_stats": {"retrieved": 2, "hurt": 1},
+            }
+        ]
+    ).save(str(skills_path))
+    MemoryBank(
+        [
+            {
+                "episode_id": "episode_plot",
+                "task_id": "task_1",
+                "task_description": "plot a chart",
+                "task_type": "bigcodebench",
+                "success": True,
+                "script": "import matplotlib.pyplot as plt",
+                "generated_code": "import matplotlib.pyplot as plt",
+                "final_code": "import matplotlib.pyplot as plt",
+                "manifest_id": "manifest_a",
+                "source_benchmark": "bigcodebench",
+                "episode_helpfulness": 1.0,
+                "q_value": 1.0,
+                "runtime_stats": {"retrieved": 3, "hurt": 2},
+            }
+        ]
+    ).save(str(memory_bank_path))
+
+    result = reset_route_runtime_utility(str(skills_path), str(memory_bank_path))
+
+    skill = SkillStore.load(str(skills_path)).get("skill_plot")
+    episode = MemoryBank.load(str(memory_bank_path)).get("episode_plot")
+    assert result["reset_skills"] == 1
+    assert result["reset_episodes"] == 1
+    assert skill["runtime_stats"]["retrieved"] == 0
+    assert skill["runtime_stats"]["hurt"] == 0
+    assert episode["runtime_stats"]["retrieved"] == 0
+    assert episode["runtime_stats"]["hurt"] == 0
 
 
 def test_build_new_arch_skill_cards_requires_route_win_for_promotion(tmp_path, monkeypatch):

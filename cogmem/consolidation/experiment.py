@@ -1016,6 +1016,36 @@ def persist_route_skill_utility(
     return persist_route_memory_utility(skill_cards_path, memory_bank_path, comparisons)
 
 
+def reset_route_runtime_utility(
+    skill_cards_path: str | None = None,
+    memory_bank_path: str | None = None,
+) -> dict[str, Any]:
+    reset_skills = 0
+    reset_episodes = 0
+    if skill_cards_path:
+        store = SkillStore.load(skill_cards_path)
+        for card in list(store):
+            if card.get("runtime_stats"):
+                reset_skills += 1
+            store.update(card["skill_id"], runtime_stats={})
+        if len(store):
+            store.save(skill_cards_path)
+    if memory_bank_path:
+        store = EpisodicStore.load(memory_bank_path)
+        for episode in list(store):
+            if episode.get("runtime_stats"):
+                reset_episodes += 1
+            store.update(episode["episode_id"], runtime_stats={})
+        if len(store):
+            store.save(memory_bank_path)
+    return {
+        "skills_path": skill_cards_path,
+        "memory_bank_path": memory_bank_path,
+        "reset_skills": reset_skills,
+        "reset_episodes": reset_episodes,
+    }
+
+
 def compare_new_arch_base_vs_adapter(
     eval_tasks: list[dict],
     *,
@@ -1601,6 +1631,7 @@ __all__ = [
     "compare_new_arch_routes",
     "persist_route_memory_utility",
     "persist_route_skill_utility",
+    "reset_route_runtime_utility",
     "run_new_arch_episode_collection",
     "build_new_arch_skill_cards",
     "run_new_arch_qstar_cycle",
