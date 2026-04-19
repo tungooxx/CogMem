@@ -92,9 +92,12 @@ class CogMemConfig:
     episode_retrieval_allow_first_attempt: bool = False
     episode_retrieval_min_score: float = 7.0
     episode_retrieval_retry_min_score: float = 5.5
-    episode_runtime_disable_min_retrieved: int = 3
+    episode_runtime_disable_min_retrieved: int = 1
     episode_runtime_disable_min_hurt: int = 1
     episode_runtime_disable_hurt_rate: float = 0.10
+    episode_runtime_neutral_downweight_min_retrieved: int = 3
+    episode_runtime_neutral_downweight: float = 3.0
+    skill_induction_require_positive_episode_utility: bool = False
     skill_route_promotion_min_tasks: int = 4
     skill_route_promotion_min_delta_passed: int = 2
     skill_route_promotion_max_regression_rate: float = 0.05
@@ -106,6 +109,9 @@ class CogMemConfig:
     skill_route_gate_task_limit: int = 30
     skill_route_gate_min_delta_passed: int = 1
     skill_route_gate_max_regression_rate: float = 0.10
+    skill_route_gate_require_router_beats_episode: bool = True
+    skill_route_gate_episode_delta_min_passed: int = 0
+    skill_route_gate_episode_max_regression_rate: float = 0.10
 
     # --- Routed adapter memory ---
     adapter_route_min_dev_gain: float = 0.0

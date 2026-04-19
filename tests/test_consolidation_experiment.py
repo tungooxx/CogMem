@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from cogmem.consolidation.experiment import (
+    _score_episode_summaries_for_record,
     _run_task_with_memory_route,
     _run_task_with_skill_cards,
     build_new_arch_skill_cards,
@@ -120,6 +121,7 @@ def test_compare_new_arch_routes_includes_skill_retrieval(monkeypatch):
     assert result["comparisons"]["base_plus_skill_vs_base"]["delta_passed"] == 0
     assert result["comparisons"]["base_plus_episode_vs_base"]["episode_utility"]["episode_plot"]["retrieved"] == 2
     assert result["comparisons"]["base_plus_router_vs_base"]["delta_passed"] == 0
+    assert result["comparisons"]["base_plus_router_vs_base_plus_episode"]["delta_passed"] == 0
     assert result["comparisons"]["adapter_plus_router_vs_adapter"]["delta_passed"] == 2
     assert result["comparisons"]["base_plus_skill_vs_base"]["skill_utility"]["skill_plot"]["retrieved"] == 2
 
@@ -179,6 +181,59 @@ def test_run_new_arch_qstar_cycle_skips_when_base_plus_skill_route_loses(tmp_pat
 
     assert result["status"] == "skipped_route_gate"
     assert result["route_gate"]["regressed_task_ids"] == ["task_1"]
+
+
+def test_run_new_arch_qstar_cycle_skips_when_router_loses_to_episode(tmp_path, monkeypatch):
+    bank_path = tmp_path / "memory_bank.json"
+    bank_path.write_text("[]", encoding="utf-8")
+    skills_path = tmp_path / "skills.json"
+    skills_path.write_text(
+        '[{"skill_id":"skill_plot","task_type":"matplotlib:plot","domain":"matplotlib","status":"promoted"}]',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("cogmem.consolidation.experiment.MemoryBank.load", lambda path: [])
+    monkeypatch.setattr("cogmem.consolidation.experiment.filter_manifest_eligible", lambda episodes, config: [])
+    monkeypatch.setattr("cogmem.consolidation.experiment.prepare_skill_training_dataset", lambda *args, **kwargs: [])
+    monkeypatch.setattr("cogmem.consolidation.experiment.prepare_preference_dataset", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.compare_new_arch_routes",
+        lambda *args, **kwargs: {
+            "comparisons": {
+                "base_plus_router_vs_base": {
+                    "delta_passed": 1,
+                    "regression_rate": 0.0,
+                    "skill_utility": {},
+                    "episode_utility": {},
+                },
+                "base_plus_router_vs_base_plus_episode": {
+                    "delta_passed": -1,
+                    "regression_rate": 0.2,
+                    "regressed_task_ids": ["task_episode_win"],
+                    "skill_utility": {},
+                    "episode_utility": {},
+                },
+            }
+        },
+    )
+
+    result = run_new_arch_qstar_cycle(
+        str(bank_path),
+        CogMemConfig(
+            memory_bank_path=str(bank_path),
+            active_model_hf="Qwen/Qwen2.5-3B-Instruct",
+            skill_route_gate_min_delta_passed=1,
+            skill_route_gate_require_router_beats_episode=True,
+            skill_route_gate_episode_delta_min_passed=0,
+            skill_route_gate_episode_max_regression_rate=0.10,
+        ),
+        cycle=0,
+        skill_cards_path=str(skills_path),
+        eval_tasks=[{"task_id": "task_1", "instruct_prompt": "plot data", "libs": ["matplotlib"]}],
+    )
+
+    assert result["status"] == "skipped_route_gate"
+    assert result["router_vs_episode_gate"]["delta_passed"] == -1
 
 
 def test_run_task_with_skill_cards_reranks_after_failure(monkeypatch):
@@ -341,6 +396,77 @@ def test_router_blocks_episode_summary_on_first_attempt_by_default(monkeypatch):
     )
 
     assert decision["selected_route"] == "none"
+
+
+def test_episode_summary_with_hurt_is_disabled_immediately():
+    episode = {
+        "episode_id": "episode_bad",
+        "task_id": "old_task",
+        "task_description": "debug plot data with matplotlib",
+        "task_type": "bigcodebench",
+        "success": True,
+        "script": "import matplotlib.pyplot as plt",
+        "generated_code": "import matplotlib.pyplot as plt",
+        "final_code": "import matplotlib.pyplot as plt",
+        "source_benchmark": "bigcodebench",
+        "episode_helpfulness": 1.0,
+        "q_value": 1.0,
+        "libs": ["matplotlib"],
+        "runtime_stats": {"retrieved": 1, "helped": 0, "hurt": 1},
+    }
+
+    scored = _score_episode_summaries_for_record(
+        MemoryBank([episode]),
+        {
+            "task_description": "plot data with matplotlib",
+            "task_type": "bigcodebench",
+            "libs": ["matplotlib"],
+        },
+        config=CogMemConfig(
+            episode_retrieval_retry_min_score=0.0,
+            episode_runtime_disable_min_retrieved=1,
+            episode_runtime_disable_min_hurt=1,
+        ),
+        retry=True,
+    )
+
+    assert scored == []
+
+
+def test_neutral_episode_summary_is_downweighted_after_repeated_retrievals():
+    base_episode = {
+        "task_id": "old_task",
+        "task_description": "debug plot data with matplotlib",
+        "task_type": "bigcodebench",
+        "success": True,
+        "script": "import matplotlib.pyplot as plt",
+        "generated_code": "import matplotlib.pyplot as plt",
+        "final_code": "import matplotlib.pyplot as plt",
+        "source_benchmark": "bigcodebench",
+        "episode_helpfulness": 1.0,
+        "q_value": 1.0,
+        "libs": ["matplotlib"],
+    }
+    neutral = {**base_episode, "episode_id": "episode_neutral", "runtime_stats": {"retrieved": 3, "helped": 0, "hurt": 0}}
+    fresh = {**base_episode, "episode_id": "episode_fresh", "runtime_stats": {}}
+
+    scored = _score_episode_summaries_for_record(
+        MemoryBank([neutral, fresh]),
+        {
+            "task_description": "plot data with matplotlib",
+            "task_type": "bigcodebench",
+            "libs": ["matplotlib"],
+        },
+        config=CogMemConfig(
+            episode_retrieval_retry_min_score=0.0,
+            episode_runtime_neutral_downweight_min_retrieved=3,
+            episode_runtime_neutral_downweight=3.0,
+        ),
+        retry=True,
+        limit=2,
+    )
+
+    assert [episode["episode_id"] for _, episode in scored] == ["episode_fresh", "episode_neutral"]
 
 
 def test_persist_route_memory_utility_updates_skill_and_episode_stores(tmp_path):
@@ -605,3 +731,62 @@ def test_build_new_arch_skill_cards_requires_route_win_for_promotion(tmp_path, m
 
     assert result["skill_summary"]["validated"] >= 0
     assert result["skill_summary"]["promoted"] == 1
+
+
+def test_build_new_arch_skill_cards_can_mine_only_positive_episode_wins(tmp_path, monkeypatch):
+    bank_path = tmp_path / "memory_bank.json"
+    MemoryBank(
+        [
+            {
+                "episode_id": "ep_helped",
+                "task_id": "task_helped",
+                "task_description": "plot data",
+                "task_type": "bigcodebench",
+                "success": True,
+                "script": "import matplotlib.pyplot as plt",
+                "generated_code": "import matplotlib.pyplot as plt",
+                "final_code": "import matplotlib.pyplot as plt",
+                "manifest_id": "manifest_a",
+                "source_benchmark": "bigcodebench",
+                "episode_helpfulness": 1.0,
+                "q_value": 1.0,
+                "runtime_stats": {"retrieved": 1, "helped": 1, "hurt": 0},
+            },
+            {
+                "episode_id": "ep_neutral",
+                "task_id": "task_neutral",
+                "task_description": "plot other data",
+                "task_type": "bigcodebench",
+                "success": True,
+                "script": "import matplotlib.pyplot as plt",
+                "generated_code": "import matplotlib.pyplot as plt",
+                "final_code": "import matplotlib.pyplot as plt",
+                "manifest_id": "manifest_a",
+                "source_benchmark": "bigcodebench",
+                "episode_helpfulness": 1.0,
+                "q_value": 1.0,
+                "runtime_stats": {"retrieved": 3, "helped": 0, "hurt": 0},
+            },
+        ]
+    ).save(str(bank_path))
+    captured = {}
+
+    def fake_build_skill_cards(episodes, dev_episodes, **kwargs):
+        captured["episode_ids"] = [episode["episode_id"] for episode in episodes]
+        return SkillStore([])
+
+    monkeypatch.setattr("cogmem.consolidation.experiment.build_skill_cards", fake_build_skill_cards)
+
+    result = build_new_arch_skill_cards(
+        str(bank_path),
+        CogMemConfig(
+            memory_bank_path=str(bank_path),
+            min_holdout=0,
+            skill_induction_require_positive_episode_utility=True,
+        ),
+        skills_path=str(tmp_path / "skills.json"),
+    )
+
+    assert captured["episode_ids"] == ["ep_helped"]
+    assert result["skill_induction_episodes"] == 1
+    assert result["skill_induction_positive_only"] is True

@@ -306,7 +306,7 @@ def _episode_route_disabled(episode: dict, config: CogMemConfig | None = None) -
     retrieved = int(runtime_stats.get("retrieved", 0) or 0)
     hurt = int(runtime_stats.get("hurt", 0) or 0)
     helped = int(runtime_stats.get("helped", 0) or 0)
-    min_retrieved = int(getattr(config, "episode_runtime_disable_min_retrieved", 3))
+    min_retrieved = int(getattr(config, "episode_runtime_disable_min_retrieved", 1))
     min_hurt = int(getattr(config, "episode_runtime_disable_min_hurt", 1))
     hurt_rate_threshold = float(getattr(config, "episode_runtime_disable_hurt_rate", 0.10))
     if retrieved < min_retrieved:
@@ -373,6 +373,10 @@ def _score_episode_summaries_for_record(
             hurt = int(runtime_stats.get("hurt", 0) or 0)
             score += 3.0 * (helped / max(retrieved, 1))
             score -= 4.5 * (hurt / max(retrieved, 1))
+            neutral_min = int(getattr(config, "episode_runtime_neutral_downweight_min_retrieved", 3))
+            neutral_penalty = float(getattr(config, "episode_runtime_neutral_downweight", 3.0))
+            if retrieved >= neutral_min and helped == 0 and hurt == 0:
+                score -= neutral_penalty
         if score >= required_score:
             scored.append((score, episode))
     scored.sort(
@@ -981,6 +985,8 @@ def persist_route_memory_utility(
     if skill_cards_path:
         store = SkillStore.load(skill_cards_path)
         for route_name, route_result in dict(comparisons or {}).items():
+            if route_name == "base_plus_router_vs_base_plus_episode":
+                continue
             skill_utility = dict(route_result.get("skill_utility", {}) or {})
             if not skill_utility:
                 continue
@@ -991,6 +997,8 @@ def persist_route_memory_utility(
     if memory_bank_path:
         store = EpisodicStore.load(memory_bank_path)
         for route_name, route_result in dict(comparisons or {}).items():
+            if route_name == "base_plus_router_vs_base_plus_episode":
+                continue
             episode_utility = dict(route_result.get("episode_utility", {}) or {})
             if not episode_utility:
                 continue
@@ -1295,6 +1303,12 @@ def compare_new_arch_routes(
             results["base"],
             results["base_plus_router"],
         )
+    if "base_plus_router" in results and "base_plus_episode" in results:
+        comparisons["base_plus_router_vs_base_plus_episode"] = _compare_route_results(
+            tasks,
+            results["base_plus_episode"],
+            results["base_plus_router"],
+        )
     if "adapter" in results:
         comparisons["adapter_vs_base"] = _compare_route_results(
             tasks,
@@ -1573,9 +1587,18 @@ def build_new_arch_skill_cards(
     eligible_bank = MemoryBank(eligible_episodes)
     holdout_n = min(cogmem_config.min_holdout, len(eligible_episodes))
     holdout_episodes, available_episodes = eligible_bank.stratified_holdout(holdout_n, seed=cogmem_config.seed)
+    positive_only = bool(getattr(cogmem_config, "skill_induction_require_positive_episode_utility", False))
+    if positive_only:
+        induction_episodes = [
+            episode
+            for episode in available_episodes
+            if int(dict(episode.get("runtime_stats", {}) or {}).get("helped", 0) or 0) > 0
+        ]
+    else:
+        induction_episodes = available_episodes
 
     skill_store = build_skill_cards(
-        available_episodes,
+        induction_episodes,
         holdout_episodes,
         config=cogmem_config,
         output_path=skills_path,
@@ -1596,6 +1619,8 @@ def build_new_arch_skill_cards(
         "episodes_total": len(bank),
         "eligible_episodes": len(eligible_episodes),
         "available_episodes": len(available_episodes),
+        "skill_induction_episodes": len(induction_episodes),
+        "skill_induction_positive_only": positive_only,
         "holdout_episodes": len(holdout_episodes),
         "task_type_counts": dict(sorted(task_type_counts.items())),
         "skill_summary": skill_store.summary(),
@@ -1630,6 +1655,7 @@ def run_new_arch_qstar_cycle(
         config=cogmem_config,
     )
     route_gate = None
+    router_vs_episode_gate = None
     if skill_cards_path and eval_tasks:
         route_eval = compare_new_arch_routes(
             eval_tasks,
@@ -1642,17 +1668,28 @@ def run_new_arch_qstar_cycle(
             task_limit=eval_task_limit or cogmem_config.skill_route_gate_task_limit,
             max_tokens=2048,
             temperature=0.0,
-            max_attempts=1,
+            max_attempts=2,
             eval_timeout=30,
             verbose=False,
         )
         route_gate = route_eval.get("comparisons", {}).get("base_plus_router_vs_base", {})
+        router_vs_episode_gate = route_eval.get("comparisons", {}).get("base_plus_router_vs_base_plus_episode", {})
         persist_route_memory_utility(skill_cards_path, memory_bank_path, route_eval.get("comparisons", {}))
         min_delta_passed = int(getattr(cogmem_config, "skill_route_gate_min_delta_passed", 1))
         max_regression_rate = float(getattr(cogmem_config, "skill_route_gate_max_regression_rate", 0.10))
+        require_router_beats_episode = bool(getattr(cogmem_config, "skill_route_gate_require_router_beats_episode", True))
+        episode_delta_min = int(getattr(cogmem_config, "skill_route_gate_episode_delta_min_passed", 0))
+        episode_max_regression = float(getattr(cogmem_config, "skill_route_gate_episode_max_regression_rate", 0.10))
         if (
             route_gate.get("delta_passed", 0) < min_delta_passed
             or route_gate.get("regression_rate", 0.0) > max_regression_rate
+            or (
+                require_router_beats_episode
+                and (
+                    router_vs_episode_gate.get("delta_passed", 0) < episode_delta_min
+                    or router_vs_episode_gate.get("regression_rate", 0.0) > episode_max_regression
+                )
+            )
         ):
             return {
                 "cycle": cycle,
@@ -1676,6 +1713,7 @@ def run_new_arch_qstar_cycle(
                 "verification": {},
                 "status": "skipped_route_gate",
                 "route_gate": route_gate,
+                "router_vs_episode_gate": router_vs_episode_gate,
             }
 
     result = run_qstar_cycle(
@@ -1687,6 +1725,8 @@ def run_new_arch_qstar_cycle(
     )
     if route_gate is not None:
         result["route_gate"] = route_gate
+    if router_vs_episode_gate is not None:
+        result["router_vs_episode_gate"] = router_vs_episode_gate
     return result
 
 
