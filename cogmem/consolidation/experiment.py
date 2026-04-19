@@ -443,9 +443,13 @@ def select_runtime_route(
     else:
         skill_scored = []
 
-    if initial_episode is not None and route_mode in {"episode", "router"}:
+    allow_episode_route = route_mode in {"episode", "router"} and (
+        bool(error_text) or bool(getattr(config, "episode_retrieval_allow_first_attempt", False))
+    )
+
+    if initial_episode is not None and allow_episode_route:
         episode_scored = [(float("inf"), initial_episode)]
-    elif episode_store is not None and route_mode in {"episode", "router"}:
+    elif episode_store is not None and allow_episode_route:
         episode_scored = _score_episode_summaries_for_record(
             episode_store,
             record,

@@ -10,6 +10,7 @@ from cogmem.consolidation.experiment import (
     persist_route_memory_utility,
     persist_route_skill_utility,
     run_new_arch_qstar_cycle,
+    select_runtime_route,
 )
 from cogmem.config import CogMemConfig
 from cogmem.memory.memory_bank import MemoryBank
@@ -302,6 +303,42 @@ def test_router_chooses_episode_summary_on_retry_when_skill_is_weak(monkeypatch)
     assert result["success"] is True
     assert [item["selected_route"] for item in result["retrieved_route_history"]] == ["none", "episode_summary"]
     assert result["retrieved_episode_id"] == "episode_fix"
+
+
+def test_router_blocks_episode_summary_on_first_attempt_by_default(monkeypatch):
+    task = {"task_id": "task_first", "instruct_prompt": "debug a rare matplotlib failure", "libs": ["matplotlib"]}
+    episode_store = MemoryBank(
+        [
+            {
+                "episode_id": "episode_rare",
+                "task_id": "old_task",
+                "task_description": "debugged rare chart",
+                "task_type": "bigcodebench",
+                "success": True,
+                "script": "print('ok')",
+                "generated_code": "print('ok')",
+                "final_code": "print('ok')",
+                "manifest_id": "manifest_a",
+                "source_benchmark": "bigcodebench",
+                "episode_helpfulness": 1.0,
+                "q_value": 1.0,
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment._score_episode_summaries_for_record",
+        lambda *args, **kwargs: [(99.0, episode_store.get("episode_rare"))],
+    )
+
+    decision = select_runtime_route(
+        task,
+        route_mode="router",
+        episode_store=episode_store,
+        config=CogMemConfig(episode_retrieval_allow_first_attempt=False),
+    )
+
+    assert decision["selected_route"] == "none"
 
 
 def test_persist_route_memory_utility_updates_skill_and_episode_stores(tmp_path):
