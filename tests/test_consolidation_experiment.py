@@ -8,6 +8,7 @@ from cogmem.consolidation.experiment import (
     build_new_arch_skill_cards,
     compare_new_arch_base_vs_adapter,
     compare_new_arch_routes,
+    debug_episode_router_comparison,
     inspect_promoted_skill_routing,
     persist_route_memory_utility,
     persist_route_skill_utility,
@@ -124,6 +125,74 @@ def test_compare_new_arch_routes_includes_skill_retrieval(monkeypatch):
     assert result["comparisons"]["base_plus_router_vs_base_plus_episode"]["delta_passed"] == 0
     assert result["comparisons"]["adapter_plus_router_vs_adapter"]["delta_passed"] == 2
     assert result["comparisons"]["base_plus_skill_vs_base"]["skill_utility"]["skill_plot"]["retrieved"] == 2
+
+
+def test_debug_episode_router_comparison_writes_router_loss_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "cogmem.consolidation.experiment.compare_new_arch_routes",
+        lambda *args, **kwargs: {
+            "base": {
+                "passed": 0,
+                "rows": [
+                    {
+                        "task_id": "BigCodeBench/26",
+                        "passed": False,
+                        "error": "AssertionError",
+                    }
+                ],
+            },
+            "base_plus_episode": {
+                "passed": 1,
+                "rows": [
+                    {
+                        "task_id": "BigCodeBench/26",
+                        "passed": True,
+                        "retrieved_episode_id": "episode_good",
+                        "retrieved_skill_ids": [],
+                        "retrieved_route_history": [
+                            {"attempt": 1, "selected_route": "none"},
+                            {"attempt": 2, "selected_route": "episode_summary", "episode_id": "episode_good"},
+                        ],
+                    }
+                ],
+            },
+            "base_plus_router": {
+                "passed": 0,
+                "rows": [
+                    {
+                        "task_id": "BigCodeBench/26",
+                        "passed": False,
+                        "error": "AssertionError",
+                        "retrieved_episode_id": None,
+                        "retrieved_skill_ids": ["skill_bad"],
+                        "retrieved_route_history": [
+                            {"attempt": 1, "selected_route": "skill", "skill_ids": ["skill_bad"]},
+                        ],
+                    }
+                ],
+            },
+            "comparisons": {
+                "base_plus_episode_vs_base": {"delta_passed": 1},
+                "base_plus_router_vs_base": {"delta_passed": 0},
+                "base_plus_router_vs_base_plus_episode": {
+                    "delta_passed": -1,
+                    "regressed_task_ids": ["BigCodeBench/26"],
+                },
+            },
+        },
+    )
+
+    report = debug_episode_router_comparison(
+        ["BigCodeBench/26"],
+        [{"task_id": "BigCodeBench/26", "instruct_prompt": "debug task"}],
+        model_name="Qwen/Qwen2.5-3B-Instruct",
+        output_dir=str(tmp_path),
+        verbose=False,
+    )
+
+    assert report["tasks"][0]["diagnosis"] == "router_chose_skill_instead_of_episode"
+    assert (tmp_path / "router_loss_debug.json").exists()
+    assert "BigCodeBench/26" in (tmp_path / "router_loss_debug.md").read_text(encoding="utf-8")
 
 
 def test_run_new_arch_qstar_cycle_skips_when_base_plus_skill_route_loses(tmp_path, monkeypatch):

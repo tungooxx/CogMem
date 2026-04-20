@@ -1353,6 +1353,177 @@ def compare_new_arch_routes(
     }
 
 
+def _row_by_task(eval_result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(row.get("task_id")): row for row in eval_result.get("rows", [])}
+
+
+def _diagnose_router_vs_episode(
+    episode_row: dict[str, Any],
+    router_row: dict[str, Any],
+) -> str:
+    episode_passed = bool(episode_row.get("passed"))
+    router_passed = bool(router_row.get("passed"))
+    if episode_passed and router_passed:
+        return "both_passed"
+    if not episode_passed and router_passed:
+        return "router_improved_over_episode"
+    if not episode_passed and not router_passed:
+        return "both_failed"
+
+    episode_id = episode_row.get("retrieved_episode_id")
+    router_episode_id = router_row.get("retrieved_episode_id")
+    router_skill_ids = list(router_row.get("retrieved_skill_ids", []) or [])
+    route_history = list(router_row.get("retrieved_route_history", []) or [])
+    route_sequence = [item.get("selected_route", "none") for item in route_history]
+    non_none_routes = [route for route in route_sequence if route != "none"]
+
+    if router_skill_ids:
+        return "router_chose_skill_instead_of_episode"
+    if not non_none_routes:
+        return "router_abstained_after_episode_route_would_help"
+    if router_episode_id and episode_id and router_episode_id != episode_id:
+        return "router_chose_different_episode"
+    if router_episode_id and router_episode_id == episode_id:
+        return "same_episode_but_router_generation_failed"
+    return "episode_passed_router_failed_unknown_route_reason"
+
+
+def _route_debug_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Router Loss Debug",
+        "",
+        f"Tasks: {', '.join(report.get('task_ids', []))}",
+        f"Memory: `{report.get('episode_memory_path')}`",
+        f"Skills: `{report.get('skill_cards_path')}`",
+        "",
+        "## Summary",
+        "",
+        "```json",
+        json.dumps(report.get("summary", {}), indent=2, ensure_ascii=False),
+        "```",
+        "",
+    ]
+    for task in report.get("tasks", []):
+        lines.extend([
+            f"## {task['task_id']}",
+            "",
+            f"Diagnosis: `{task['diagnosis']}`",
+            "",
+            "| route | passed | error | retrieved episode | retrieved skills |",
+            "|---|---:|---|---|---|",
+        ])
+        for route_name in ("base", "base_plus_episode", "base_plus_router"):
+            row = task.get(route_name, {})
+            error = str(row.get("error") or "").replace("\n", " ")[:160]
+            lines.append(
+                "| {} | {} | {} | {} | {} |".format(
+                    route_name,
+                    int(bool(row.get("passed"))),
+                    error,
+                    row.get("retrieved_episode_id") or "",
+                    ", ".join(row.get("retrieved_skill_ids", []) or []),
+                )
+            )
+        lines.extend([
+            "",
+            "Episode route history:",
+            "```json",
+            json.dumps(task.get("base_plus_episode", {}).get("retrieved_route_history", []), indent=2, ensure_ascii=False),
+            "```",
+            "",
+            "Router route history:",
+            "```json",
+            json.dumps(task.get("base_plus_router", {}).get("retrieved_route_history", []), indent=2, ensure_ascii=False),
+            "```",
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def debug_episode_router_comparison(
+    task_ids: list[str],
+    all_tasks: list[dict],
+    *,
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    skill_cards_path: str | None = None,
+    episode_memory_path: str | None = None,
+    skill_top_k: int = 1,
+    config: CogMemConfig | None = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.0,
+    max_attempts: int = 2,
+    eval_timeout: int = 30,
+    output_dir: str | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Run a small read-only episode-vs-router comparison and save debug artifacts."""
+    wanted = [str(task_id) for task_id in task_ids]
+    task_by_id = {str(task.get("task_id")): task for task in all_tasks}
+    selected_tasks = [task_by_id[task_id] for task_id in wanted if task_id in task_by_id]
+    missing = [task_id for task_id in wanted if task_id not in task_by_id]
+    if missing:
+        raise KeyError(f"Unknown task ids for debug comparison: {missing}")
+
+    result = compare_new_arch_routes(
+        selected_tasks,
+        model_name=model_name,
+        skill_cards_path=skill_cards_path,
+        episode_memory_path=episode_memory_path,
+        adapter_path=None,
+        skill_top_k=skill_top_k,
+        config=config,
+        task_limit=None,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        max_attempts=max_attempts,
+        eval_timeout=eval_timeout,
+        verbose=verbose,
+    )
+
+    base_rows = _row_by_task(result.get("base", {}))
+    episode_rows = _row_by_task(result.get("base_plus_episode", {}))
+    router_rows = _row_by_task(result.get("base_plus_router", {}))
+    task_reports = []
+    for task_id in wanted:
+        episode_row = episode_rows.get(task_id, {})
+        router_row = router_rows.get(task_id, {})
+        task_reports.append({
+            "task_id": task_id,
+            "diagnosis": _diagnose_router_vs_episode(episode_row, router_row),
+            "base": base_rows.get(task_id, {}),
+            "base_plus_episode": episode_row,
+            "base_plus_router": router_row,
+        })
+
+    comparisons = dict(result.get("comparisons", {}) or {})
+    report = {
+        "task_ids": wanted,
+        "model_name": model_name,
+        "skill_cards_path": skill_cards_path,
+        "episode_memory_path": episode_memory_path,
+        "summary": {
+            "base_passed": result.get("base", {}).get("passed"),
+            "base_plus_episode_passed": result.get("base_plus_episode", {}).get("passed"),
+            "base_plus_router_passed": result.get("base_plus_router", {}).get("passed"),
+            "base_plus_episode_vs_base": comparisons.get("base_plus_episode_vs_base", {}),
+            "base_plus_router_vs_base": comparisons.get("base_plus_router_vs_base", {}),
+            "base_plus_router_vs_base_plus_episode": comparisons.get("base_plus_router_vs_base_plus_episode", {}),
+        },
+        "tasks": task_reports,
+    }
+
+    if output_dir:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        json_path = out_dir / "router_loss_debug.json"
+        md_path = out_dir / "router_loss_debug.md"
+        json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        md_path.write_text(_route_debug_markdown(report), encoding="utf-8")
+        report["json_path"] = str(json_path)
+        report["markdown_path"] = str(md_path)
+    return report
+
+
 def _collection_signature(tasks: list[dict]) -> dict[str, Any]:
     return {
         "count": len(tasks),
@@ -1758,6 +1929,7 @@ __all__ = [
     "evaluate_new_arch_model",
     "compare_new_arch_base_vs_adapter",
     "compare_new_arch_routes",
+    "debug_episode_router_comparison",
     "persist_route_memory_utility",
     "persist_route_skill_utility",
     "reset_route_runtime_utility",
