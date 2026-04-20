@@ -97,6 +97,9 @@ class CogMemConfig:
     episode_runtime_disable_hurt_rate: float = 0.10
     episode_runtime_neutral_downweight_min_retrieved: int = 3
     episode_runtime_neutral_downweight: float = 3.0
+    blocked_episode_ids: List[str] = field(default_factory=list)
+    episode_route_eval_max_retrievals_per_episode: int = 3
+    episode_route_eval_diversity_penalty: float = 2.0
     skill_induction_require_positive_episode_utility: bool = False
     skill_route_promotion_min_tasks: int = 4
     skill_route_promotion_min_delta_passed: int = 2

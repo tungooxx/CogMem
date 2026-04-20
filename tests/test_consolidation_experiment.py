@@ -433,6 +433,112 @@ def test_episode_summary_with_hurt_is_disabled_immediately():
     assert scored == []
 
 
+def test_blocked_episode_id_is_not_retrieved():
+    episode = {
+        "episode_id": "episode_blocked",
+        "task_id": "old_task",
+        "task_description": "debug plot data with matplotlib",
+        "task_type": "bigcodebench",
+        "success": True,
+        "script": "import matplotlib.pyplot as plt",
+        "generated_code": "import matplotlib.pyplot as plt",
+        "final_code": "import matplotlib.pyplot as plt",
+        "source_benchmark": "bigcodebench",
+        "episode_helpfulness": 1.0,
+        "q_value": 1.0,
+        "libs": ["matplotlib"],
+    }
+
+    scored = _score_episode_summaries_for_record(
+        MemoryBank([episode]),
+        {
+            "task_description": "plot data with matplotlib",
+            "task_type": "bigcodebench",
+            "libs": ["matplotlib"],
+        },
+        config=CogMemConfig(
+            episode_retrieval_retry_min_score=0.0,
+            blocked_episode_ids=["episode_blocked"],
+        ),
+        retry=True,
+    )
+
+    assert scored == []
+
+
+def test_episode_eval_usage_cap_prevents_dominating_route():
+    base_episode = {
+        "task_id": "old_task",
+        "task_description": "debug plot data with matplotlib",
+        "task_type": "bigcodebench",
+        "success": True,
+        "script": "import matplotlib.pyplot as plt",
+        "generated_code": "import matplotlib.pyplot as plt",
+        "final_code": "import matplotlib.pyplot as plt",
+        "source_benchmark": "bigcodebench",
+        "episode_helpfulness": 1.0,
+        "q_value": 1.0,
+        "libs": ["matplotlib"],
+    }
+    overused = {**base_episode, "episode_id": "episode_overused"}
+    fresh = {**base_episode, "episode_id": "episode_fresh"}
+
+    scored = _score_episode_summaries_for_record(
+        MemoryBank([overused, fresh]),
+        {
+            "task_description": "plot data with matplotlib",
+            "task_type": "bigcodebench",
+            "libs": ["matplotlib"],
+        },
+        config=CogMemConfig(
+            episode_retrieval_retry_min_score=0.0,
+            episode_route_eval_max_retrievals_per_episode=3,
+        ),
+        retry=True,
+        limit=2,
+        episode_usage_counts={"episode_overused": 3},
+    )
+
+    assert [episode["episode_id"] for _, episode in scored] == ["episode_fresh"]
+
+
+def test_episode_eval_diversity_penalty_prefers_less_used_memory():
+    base_episode = {
+        "task_id": "old_task",
+        "task_description": "debug plot data with matplotlib",
+        "task_type": "bigcodebench",
+        "success": True,
+        "script": "import matplotlib.pyplot as plt",
+        "generated_code": "import matplotlib.pyplot as plt",
+        "final_code": "import matplotlib.pyplot as plt",
+        "source_benchmark": "bigcodebench",
+        "episode_helpfulness": 1.0,
+        "q_value": 1.0,
+        "libs": ["matplotlib"],
+    }
+    used = {**base_episode, "episode_id": "episode_used"}
+    fresh = {**base_episode, "episode_id": "episode_fresh"}
+
+    scored = _score_episode_summaries_for_record(
+        MemoryBank([used, fresh]),
+        {
+            "task_description": "plot data with matplotlib",
+            "task_type": "bigcodebench",
+            "libs": ["matplotlib"],
+        },
+        config=CogMemConfig(
+            episode_retrieval_retry_min_score=0.0,
+            episode_route_eval_max_retrievals_per_episode=10,
+            episode_route_eval_diversity_penalty=2.0,
+        ),
+        retry=True,
+        limit=2,
+        episode_usage_counts={"episode_used": 1},
+    )
+
+    assert [episode["episode_id"] for _, episode in scored] == ["episode_fresh", "episode_used"]
+
+
 def test_neutral_episode_summary_is_downweighted_after_repeated_retrievals():
     base_episode = {
         "task_id": "old_task",

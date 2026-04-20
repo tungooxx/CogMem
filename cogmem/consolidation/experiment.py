@@ -302,6 +302,10 @@ def _task_prompt_hash(task_description: str) -> str | None:
 
 
 def _episode_route_disabled(episode: dict, config: CogMemConfig | None = None) -> bool:
+    episode_id = str(episode.get("episode_id") or "")
+    blocked_ids = {str(item) for item in list(getattr(config, "blocked_episode_ids", []) or [])}
+    if episode_id and episode_id in blocked_ids:
+        return True
     runtime_stats = dict(episode.get("runtime_stats", {}) or {})
     retrieved = int(runtime_stats.get("retrieved", 0) or 0)
     hurt = int(runtime_stats.get("hurt", 0) or 0)
@@ -323,6 +327,7 @@ def _score_episode_summaries_for_record(
     config: CogMemConfig | None = None,
     retry: bool = False,
     exclude_episode_ids: set[str] | None = None,
+    episode_usage_counts: dict[str, int] | None = None,
 ) -> list[tuple[float, dict]]:
     episodes = list(store) if isinstance(store, EpisodicStore) else list(store)
     record_group = _group_key(record)
@@ -339,11 +344,18 @@ def _score_episode_summaries_for_record(
         )
     )
     excluded = set(exclude_episode_ids or set())
+    usage_counts = dict(episode_usage_counts or {})
+    max_eval_retrievals = int(getattr(config, "episode_route_eval_max_retrievals_per_episode", 0) or 0)
+    diversity_penalty = float(getattr(config, "episode_route_eval_diversity_penalty", 0.0) or 0.0)
     scored: list[tuple[float, dict]] = []
     for episode in episodes:
+        episode_id = str(episode.get("episode_id") or "")
         if not episode.get("success"):
             continue
-        if episode.get("episode_id") in excluded:
+        if episode_id in excluded:
+            continue
+        eval_retrievals = int(usage_counts.get(episode_id, 0) or 0)
+        if max_eval_retrievals > 0 and eval_retrievals >= max_eval_retrievals:
             continue
         if _episode_route_disabled(episode, config):
             continue
@@ -377,6 +389,8 @@ def _score_episode_summaries_for_record(
             neutral_penalty = float(getattr(config, "episode_runtime_neutral_downweight", 3.0))
             if retrieved >= neutral_min and helped == 0 and hurt == 0:
                 score -= neutral_penalty
+        if eval_retrievals > 0 and diversity_penalty > 0.0:
+            score -= diversity_penalty * eval_retrievals
         if score >= required_score:
             scored.append((score, episode))
     scored.sort(
@@ -414,6 +428,7 @@ def select_runtime_route(
     previous_route_history: list[dict] | None = None,
     initial_skill_cards: list[dict] | None = None,
     initial_episode: dict | None = None,
+    episode_usage_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     record = _route_record_for_task(task, error_text=error_text)
     seen_skill_ids = {
@@ -461,6 +476,7 @@ def select_runtime_route(
             config=config,
             retry=bool(error_text),
             exclude_episode_ids=seen_episode_ids if error_text else None,
+            episode_usage_counts=episode_usage_counts,
         )
     else:
         episode_scored = []
@@ -509,6 +525,7 @@ def _run_task_with_memory_route(
     max_tokens: int = 2048,
     temperature: float = 0.0,
     max_attempts: int = 1,
+    episode_usage_counts: dict[str, int] | None = None,
 ) -> dict:
     trajectory = []
     retrieved_route_history: list[dict[str, Any]] = []
@@ -528,6 +545,7 @@ def _run_task_with_memory_route(
             previous_route_history=retrieved_route_history,
             initial_skill_cards=current_skill_cards if attempt == 1 else None,
             initial_episode=current_episode if attempt == 1 else None,
+            episode_usage_counts=episode_usage_counts,
         )
         selected_route = route_selection["selected_route"]
         current_skill_cards = list(route_selection.get("skill_cards", []) or [])
@@ -712,6 +730,7 @@ def evaluate_new_arch_model(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 max_attempts=max_attempts,
+                episode_usage_counts=selected_episode_ids,
             )
             success = bool(episode.get("success"))
             if success:
