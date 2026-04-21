@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 
 from cogmem.consolidation.experiment import (
+    _runtime_has_cpu_or_disk_offload,
+    _runtime_quantization_mode,
     _score_episode_summaries_for_record,
     _run_task_with_memory_route,
     _run_task_with_skill_cards,
@@ -19,6 +21,21 @@ from cogmem.consolidation.experiment import (
 from cogmem.config import CogMemConfig
 from cogmem.memory.memory_bank import MemoryBank
 from cogmem.memory.skill_store import SkillStore
+
+
+def test_runtime_quantization_mode_respects_configured_bits():
+    assert _runtime_quantization_mode(8, cuda_available=True) == 8
+    assert _runtime_quantization_mode(4, cuda_available=True) == 4
+    assert _runtime_quantization_mode(16, cuda_available=True) is None
+    assert _runtime_quantization_mode(8, cuda_available=False) is None
+
+
+def test_runtime_detects_cpu_disk_or_meta_offload():
+    assert _runtime_has_cpu_or_disk_offload(SimpleNamespace(hf_device_map={"layer0": 0})) is False
+    assert _runtime_has_cpu_or_disk_offload(SimpleNamespace(hf_device_map={"layer0": "cuda:0"})) is False
+    assert _runtime_has_cpu_or_disk_offload(SimpleNamespace(hf_device_map={"layer0": "cpu"})) is True
+    assert _runtime_has_cpu_or_disk_offload(SimpleNamespace(hf_device_map={"layer0": "disk"})) is True
+    assert _runtime_has_cpu_or_disk_offload(SimpleNamespace(hf_device_map={"layer0": "meta"})) is True
 
 
 def test_compare_new_arch_base_vs_adapter_reports_improvements(monkeypatch):
@@ -56,7 +73,7 @@ def test_compare_new_arch_routes_includes_skill_retrieval(monkeypatch):
 
     monkeypatch.setattr(
         "cogmem.consolidation.experiment.load_new_arch_runtime",
-        lambda *, model_name, adapter_path=None: (
+        lambda *, model_name, adapter_path=None, quantization_bits=8: (
             object(),
             object(),
             SimpleNamespace(mode="adapter" if adapter_path else "base"),

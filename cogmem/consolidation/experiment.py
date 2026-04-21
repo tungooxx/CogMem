@@ -134,6 +134,25 @@ def _ensure_torch_pytree_compat() -> None:
         pytree.register_pytree_node = register_pytree_node
 
 
+def _runtime_quantization_mode(quantization_bits: int | None, *, cuda_available: bool) -> int | None:
+    try:
+        bits = int(quantization_bits or 0)
+    except (TypeError, ValueError):
+        bits = 0
+    if not cuda_available:
+        return None
+    return bits if bits in {4, 8} else None
+
+
+def _runtime_device_map(*, cuda_available: bool) -> dict[str, int] | None:
+    return {"": 0} if cuda_available else None
+
+
+def _runtime_has_cpu_or_disk_offload(model) -> bool:
+    device_map = dict(getattr(model, "hf_device_map", {}) or {})
+    return any(str(device).lower() in {"cpu", "disk", "meta"} for device in device_map.values())
+
+
 def load_new_arch_tasks(
     *,
     task_jsonl_path: str | None = None,
@@ -195,31 +214,56 @@ def load_new_arch_runtime(
     *,
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
     adapter_path: str | None = None,
+    quantization_bits: int | None = 8,
 ):
     import torch
 
     _ensure_torch_pytree_compat()
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=dtype,
-        bnb_4bit_use_double_quant=True,
+    cuda_available = bool(torch.cuda.is_available())
+    dtype = (
+        torch.bfloat16
+        if cuda_available and torch.cuda.is_bf16_supported()
+        else torch.float16
+        if cuda_available
+        else torch.float32
     )
-    try:
+    quantization_mode = _runtime_quantization_mode(
+        quantization_bits,
+        cuda_available=cuda_available,
+    )
+    device_map = _runtime_device_map(cuda_available=cuda_available)
+    model = None
+    if quantization_mode is not None:
+        bnb_kwargs = {"load_in_8bit": True} if quantization_mode == 8 else {
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": dtype,
+            "bnb_4bit_use_double_quant": True,
+        }
+        bnb_config = BitsAndBytesConfig(**bnb_kwargs)
+        try:
+            load_kwargs = {"quantization_config": bnb_config}
+            if device_map is not None:
+                load_kwargs["device_map"] = device_map
+            model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+            if _runtime_has_cpu_or_disk_offload(model):
+                raise RuntimeError("quantized runtime was dispatched to CPU/disk/meta")
+        except Exception as exc:
+            print(
+                f"{quantization_mode}-bit runtime load failed ({type(exc).__name__}: {exc}); "
+                f"retrying with plain {'GPU' if cuda_available else 'CPU'} weights."
+            )
+            model = None
+
+    if model is None:
+        load_kwargs = {"torch_dtype": dtype}
+        if device_map is not None:
+            load_kwargs["device_map"] = device_map
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            quantization_config=bnb_config,
-            device_map="auto",
-        )
-    except Exception as exc:
-        print(f"4-bit runtime load failed ({type(exc).__name__}: {exc}); retrying without bitsandbytes quantization.")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            device_map="auto",
+            **load_kwargs,
         )
     if adapter_path:
         from peft import PeftModel
@@ -714,6 +758,7 @@ def evaluate_new_arch_model(
         model, tokenizer, llm_client = load_new_arch_runtime(
             model_name=model_name,
             adapter_path=adapter_path,
+            quantization_bits=getattr(config, "quantization_bits", 8),
         )
 
         for idx, task in enumerate(tasks):
