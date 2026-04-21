@@ -23,6 +23,7 @@ logs/
 # Notebooks with outputs (may contain secrets)
 paperspace*.ipynb
 !paperspace_new_architecture.ipynb
+!paperspace_path_leakage_tests.ipynb
 
 # Archived old notebooks
 notebooks_archive/
