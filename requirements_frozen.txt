@@ -626,7 +626,7 @@ tqdm @ file:///home/conda/feedstock_root/build_artifacts/tqdm_1735661334605/work
 traceback2==1.4.0
 traci==1.26.0
 traitlets @ file:///C:/Users/dev-admin/perseverance-python-buildout/croot/traitlets_1729038154689/work
-transformers==4.56.2
+transformers==4.45.2
 truststore @ file:///C:/b/abs_494cm143zh/croot/truststore_1736550137835/work
 Twisted @ file:///C:/b/abs_65oatfcpaw/croot/twisted_1743537791862/work
 twisted-iocpsupport @ file:///C:/b/abs_6883jqhfrn/croot/twisted-iocpsupport_1736544552637/work
