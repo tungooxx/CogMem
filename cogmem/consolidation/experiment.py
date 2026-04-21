@@ -215,6 +215,7 @@ def load_new_arch_runtime(
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
     adapter_path: str | None = None,
     quantization_bits: int | None = 8,
+    allow_plain_fallback: bool = True,
 ):
     import torch
 
@@ -235,6 +236,7 @@ def load_new_arch_runtime(
     )
     device_map = _runtime_device_map(cuda_available=cuda_available)
     model = None
+    quantization_error: Exception | None = None
     if quantization_mode is not None:
         bnb_kwargs = {"load_in_8bit": True} if quantization_mode == 8 else {
             "load_in_4bit": True,
@@ -251,11 +253,23 @@ def load_new_arch_runtime(
             if _runtime_has_cpu_or_disk_offload(model):
                 raise RuntimeError("quantized runtime was dispatched to CPU/disk/meta")
         except Exception as exc:
+            quantization_error = exc
+            fallback_msg = (
+                f"retrying with plain {'GPU' if cuda_available else 'CPU'} weights"
+                if allow_plain_fallback
+                else "plain fallback disabled"
+            )
             print(
                 f"{quantization_mode}-bit runtime load failed ({type(exc).__name__}: {exc}); "
-                f"retrying with plain {'GPU' if cuda_available else 'CPU'} weights."
+                f"{fallback_msg}."
             )
             model = None
+
+    if model is None and quantization_mode is not None and not allow_plain_fallback:
+        raise RuntimeError(
+            f"{quantization_mode}-bit runtime load failed and plain fallback is disabled. "
+            "Free GPU memory or fix the bitsandbytes/transformers runtime before benchmarking."
+        ) from quantization_error
 
     if model is None:
         load_kwargs = {"torch_dtype": dtype}

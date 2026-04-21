@@ -73,7 +73,7 @@ def test_compare_new_arch_routes_includes_skill_retrieval(monkeypatch):
 
     monkeypatch.setattr(
         "cogmem.consolidation.experiment.load_new_arch_runtime",
-        lambda *, model_name, adapter_path=None, quantization_bits=8: (
+        lambda *, model_name, adapter_path=None, quantization_bits=8, allow_plain_fallback=True: (
             object(),
             object(),
             SimpleNamespace(mode="adapter" if adapter_path else "base"),
