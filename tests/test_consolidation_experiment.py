@@ -448,7 +448,7 @@ def test_router_chooses_episode_summary_on_retry_when_skill_is_weak(monkeypatch)
     assert result["retrieved_episode_id"] == "episode_fix"
 
 
-def test_router_blocks_episode_summary_on_first_attempt_by_default(monkeypatch):
+def test_router_blocks_episode_summary_on_first_attempt_without_positive_runtime(monkeypatch):
     task = {"task_id": "task_first", "instruct_prompt": "debug a rare matplotlib failure", "libs": ["matplotlib"]}
     episode_store = MemoryBank(
         [
@@ -471,7 +471,11 @@ def test_router_blocks_episode_summary_on_first_attempt_by_default(monkeypatch):
 
     monkeypatch.setattr(
         "cogmem.consolidation.experiment._score_episode_summaries_for_record",
-        lambda *args, **kwargs: [(99.0, episode_store.get("episode_rare"))],
+        lambda *args, **kwargs: (
+            []
+            if kwargs.get("require_positive_runtime")
+            else [(99.0, episode_store.get("episode_rare"))]
+        ),
     )
 
     decision = select_runtime_route(
@@ -482,6 +486,43 @@ def test_router_blocks_episode_summary_on_first_attempt_by_default(monkeypatch):
     )
 
     assert decision["selected_route"] == "none"
+
+
+def test_router_allows_high_confidence_positive_episode_on_first_attempt():
+    task = {"task_id": "task_first", "instruct_prompt": "debug a rare matplotlib failure", "libs": ["matplotlib"]}
+    episode_store = MemoryBank(
+        [
+            {
+                "episode_id": "episode_positive",
+                "task_id": "old_task",
+                "task_description": "debugged rare matplotlib failure",
+                "task_type": "bigcodebench",
+                "success": True,
+                "script": "import matplotlib.pyplot as plt",
+                "generated_code": "import matplotlib.pyplot as plt",
+                "final_code": "import matplotlib.pyplot as plt",
+                "manifest_id": "manifest_a",
+                "source_benchmark": "bigcodebench",
+                "episode_helpfulness": 1.0,
+                "q_value": 1.0,
+                "libs": ["matplotlib"],
+                "runtime_stats": {"retrieved": 2, "helped": 1, "hurt": 0},
+            }
+        ]
+    )
+
+    decision = select_runtime_route(
+        task,
+        route_mode="router",
+        episode_store=episode_store,
+        config=CogMemConfig(
+            episode_retrieval_allow_first_attempt=False,
+            episode_first_attempt_min_score=0.0,
+        ),
+    )
+
+    assert decision["selected_route"] == "episode_summary"
+    assert decision["episode"]["episode_id"] == "episode_positive"
 
 
 def test_episode_summary_with_hurt_is_disabled_immediately():

@@ -90,6 +90,7 @@ class CogMemConfig:
     skill_runtime_disable_hurt_rate: float = 0.10
     episode_summary_max_code_lines: int = 8
     episode_retrieval_allow_first_attempt: bool = False
+    episode_first_attempt_min_score: float = 10.0
     episode_retrieval_min_score: float = 7.0
     episode_retrieval_retry_min_score: float = 5.5
     episode_runtime_disable_min_retrieved: int = 1

@@ -377,6 +377,13 @@ def _episode_route_disabled(episode: dict, config: CogMemConfig | None = None) -
     return helped == 0 and hurt >= min_hurt and hurt_rate >= hurt_rate_threshold
 
 
+def _episode_has_positive_runtime_signal(episode: dict) -> bool:
+    runtime_stats = dict(episode.get("runtime_stats", {}) or {})
+    helped = int(runtime_stats.get("helped", 0) or 0)
+    hurt = int(runtime_stats.get("hurt", 0) or 0)
+    return helped > 0 and hurt == 0
+
+
 def _score_episode_summaries_for_record(
     store: EpisodicStore | list[dict],
     record: dict,
@@ -384,6 +391,8 @@ def _score_episode_summaries_for_record(
     limit: int = 1,
     config: CogMemConfig | None = None,
     retry: bool = False,
+    required_score_override: float | None = None,
+    require_positive_runtime: bool = False,
     exclude_episode_ids: set[str] | None = None,
     episode_usage_counts: dict[str, int] | None = None,
 ) -> list[tuple[float, dict]]:
@@ -394,11 +403,15 @@ def _score_episode_summaries_for_record(
     record_tokens = _episode_hint_tokens(record)
     error_family = str(record.get("error_family") or infer_error_family(record.get("error")) or "")
     record_prompt_hash = _task_prompt_hash(record.get("task_description", ""))
-    required_score = float(
-        getattr(
-            config,
-            "episode_retrieval_retry_min_score" if retry else "episode_retrieval_min_score",
-            5.5 if retry else 7.0,
+    required_score = (
+        float(required_score_override)
+        if required_score_override is not None
+        else float(
+            getattr(
+                config,
+                "episode_retrieval_retry_min_score" if retry else "episode_retrieval_min_score",
+                5.5 if retry else 7.0,
+            )
         )
     )
     excluded = set(exclude_episode_ids or set())
@@ -416,6 +429,8 @@ def _score_episode_summaries_for_record(
         if max_eval_retrievals > 0 and eval_retrievals >= max_eval_retrievals:
             continue
         if _episode_route_disabled(episode, config):
+            continue
+        if require_positive_runtime and not _episode_has_positive_runtime_signal(episode):
             continue
         episode_group = _group_key(episode)
         episode_domain = _episode_domain(episode)
@@ -520,19 +535,32 @@ def select_runtime_route(
     else:
         skill_scored = []
 
+    retry_episode_route = bool(error_text)
+    explicit_first_attempt_episode = bool(getattr(config, "episode_retrieval_allow_first_attempt", False))
+    high_confidence_first_attempt_episode = (
+        route_mode in {"episode", "router"}
+        and not retry_episode_route
+        and not explicit_first_attempt_episode
+    )
     allow_episode_route = route_mode in {"episode", "router"} and (
-        bool(error_text) or bool(getattr(config, "episode_retrieval_allow_first_attempt", False))
+        retry_episode_route or explicit_first_attempt_episode or high_confidence_first_attempt_episode
     )
 
     if initial_episode is not None and allow_episode_route:
         episode_scored = [(float("inf"), initial_episode)]
     elif episode_store is not None and allow_episode_route:
+        required_score_override = (
+            float(getattr(config, "episode_first_attempt_min_score", 10.0))
+            if high_confidence_first_attempt_episode else None
+        )
         episode_scored = _score_episode_summaries_for_record(
             episode_store,
             record,
             limit=1,
             config=config,
-            retry=bool(error_text),
+            retry=retry_episode_route,
+            required_score_override=required_score_override,
+            require_positive_runtime=high_confidence_first_attempt_episode,
             exclude_episode_ids=seen_episode_ids if error_text else None,
             episode_usage_counts=episode_usage_counts,
         )
